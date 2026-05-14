@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the print1.ai Print Processor app.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique ID of the user." },
+        "email": { "type": "string", "format": "email", "description": "The email address of the user." },
+        "displayName": { "type": "string", "description": "The display name of the user." },
+        "photoURL": { "type": "string", "description": "The profile photo URL of the user." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the user account was created." }
+      },
+      "required": ["uid", "email"]
+    },
+    "PrintJob": {
+      "title": "Print Job",
+      "description": "A record of a processed print file.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the print job. (Optional if using addDoc)" },
+        "userId": { "type": "string", "description": "The ID of the user who created this job." },
+        "fileName": { "type": "string", "description": "The original name of the file." },
+        "format": { "type": "string", "description": "The print format used (e.g., A4, Business Card)." },
+        "type": { "type": "string", "description": "The type of operation (e.g., pdf_export)." },
+        "isApproved": { "type": "boolean", "description": "Whether the job was approved by the client." },
+        "settings": { "type": "object", "description": "The processing settings used." },
+        "analysis": { "type": "object", "description": "The AI analysis results." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the job was processed." }
+      },
+      "required": ["userId", "fileName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile information."
+    },
+    "/users/{userId}/history/{jobId}": {
+      "schema": "PrintJob",
+      "description": "A user's history of processed print jobs."
+    }
+  }
+}

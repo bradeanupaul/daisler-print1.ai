@@ -1,0 +1,116 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (uid)
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required, email format)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - createdAt: string (required, date-time format)
+    //
+    // Collection: users/{userId}/history
+    // Document ID: jobId (uuid)
+    // Fields:
+    //   - id: string (required)
+    //   - userId: string (required)
+    //   - fileName: string (required)
+    //   - format: string (optional)
+    //   - settings: map (optional)
+    //   - analysis: map (optional)
+    //   - createdAt: string (required, date-time format)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp;
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "andrei.milchis@netkyu.com" && request.auth.token.email_verified == true));
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'createdAt', 'lastLogin', 'role']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.email is string && isValidEmail(data.email) &&
+             (data.createdAt == request.time || isValidTimestamp(data.createdAt)) &&
+             (data.lastLogin == request.time || isValidTimestamp(data.lastLogin));
+    }
+
+    function isValidPrintJob(data) {
+      return hasOnlyAllowedFields(['id', 'userId', 'fileName', 'format', 'settings', 'analysis', 'createdAt', 'timestamp', 'type', 'isApproved']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.fileName is string && data.fileName.size() > 0 && data.fileName.size() < 255 &&
+             (data.createdAt == request.time || isValidTimestamp(data.createdAt));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Users can only read their own profile
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Users can create their own profile, but not set their own role unless they are admin
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && 
+                    (!('role' in request.resource.data) || request.resource.data.role == 'user' || isAdmin());
+      
+      // Users can update their own profile, but not their role
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
+                    (request.resource.data.role == resource.data.role || isAdmin());
+
+      match /history/{jobId} {
+        // Users can only read their own history
+        allow read: if isOwner(userId) || isAdmin();
+        
+        // Users can only create their own history
+        allow create: if isOwner(userId) && isValidPrintJob(request.resource.data);
+        
+        // History is immutable for the user
+        allow update: if isAdmin();
+        
+        // Users can delete their own history
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

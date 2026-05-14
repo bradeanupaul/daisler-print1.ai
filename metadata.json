@@ -1,0 +1,5 @@
+{
+  "name": "print1.ai",
+  "description": "Professional AI-powered print file processor and mockup generator for modern print shops.",
+  "requestFramePermissions": ["microphone"]
+}
