@@ -9,7 +9,6 @@ import firebaseConfig from '../../firebase-applet-config.json';
 interface LoginPageProps {
   onLoginSuccess?: () => void;
 }
-
 export const LoginPage: React.FC<LoginPageProps> = () => {
   const [localhostLoginUrl, setLocalhostLoginUrl] = useState<string | null>(null);
   const [authHost, setAuthHost] = useState<{ origin: string; hostname: string } | null>(null);
