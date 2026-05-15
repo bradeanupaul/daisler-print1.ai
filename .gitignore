@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+.firebase/
+functions/node_modules/
+**/firebase-adminsdk*.json
+scripts/.integration-secrets-migration.sql
+scripts/.vault-insert.sql

@@ -23,7 +23,6 @@
         "fileName": { "type": "string", "description": "The original name of the file." },
         "format": { "type": "string", "description": "The print format used (e.g., A4, Business Card)." },
         "type": { "type": "string", "description": "The type of operation (e.g., pdf_export)." },
-        "isApproved": { "type": "boolean", "description": "Whether the job was approved by the client." },
         "settings": { "type": "object", "description": "The processing settings used." },
         "analysis": { "type": "object", "description": "The AI analysis results." },
         "createdAt": { "type": "string", "format": "date-time", "description": "When the job was processed." }

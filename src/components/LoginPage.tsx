@@ -51,9 +51,9 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0d1117] text-[#e2e8f0] flex flex-col lg:flex-row overflow-hidden">
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--text)] flex flex-col lg:flex-row overflow-hidden">
       {/* Left Side: Branding & Features */}
-      <div className="hidden lg:flex lg:w-1/2 bg-[#161b22] p-12 flex-col justify-between relative overflow-hidden border-r border-white/5">
+      <div className="hidden lg:flex lg:w-1/2 bg-[var(--surface-elevated)] p-12 flex-col justify-between relative overflow-hidden border-r border-white/5">
         <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
           <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-amber-500 rounded-full blur-[120px]" />
           <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500 rounded-full blur-[120px]" />
@@ -198,9 +198,12 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
           )}
 
           <div className="bg-[#161b22] p-8 rounded-3xl border border-white/5 shadow-2xl space-y-6">
-            <button 
+            <motion.button
+              type="button"
+              whileTap={{ scale: 0.97 }}
+              transition={{ type: "spring", stiffness: 520, damping: 32 }}
               onClick={handleLogin}
-              className="w-full flex items-center justify-center gap-3 bg-white text-black py-4 rounded-2xl font-bold hover:bg-gray-100 transition-all active:scale-[0.98]"
+              className="w-full flex items-center justify-center gap-3 bg-white text-black py-4 rounded-2xl font-bold hover:bg-gray-100 transition-colors"
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24">
                 <path
@@ -221,7 +224,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                 />
               </svg>
               Sign in with Google
-            </button>
+            </motion.button>
 
             <div className="relative">
               <div className="absolute inset-0 flex items-center">

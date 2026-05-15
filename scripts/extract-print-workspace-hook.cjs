@@ -90,8 +90,6 @@ const footer = `
     isListening,
     chatMessages,
     isTyping,
-    isApproved,
-    setIsApproved,
     totalPages,
     currentPage,
     setCurrentPage,

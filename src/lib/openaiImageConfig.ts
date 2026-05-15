@@ -1,11 +1,22 @@
-/** Config injectată de Vite `define` pentru fluxuri imagine OpenAI. */
+import { loadAiAppSettings } from "./aiAppSettings";
+import { OPENAI_IMAGE_MODELS, resolveModelFromCatalog } from "./aiModelCatalog";
+
+const DEFAULT = "gpt-image-2";
+
+/** Model OpenAI pentru images.edit. Setări AI > .env > implicit. */
 export function resolveOpenAIImageModel(): string {
-  const raw =
+  const app = loadAiAppSettings();
+  const fromEnv =
     (typeof process !== "undefined" &&
       process.env.OPENAI_IMAGE_MODEL &&
       String(process.env.OPENAI_IMAGE_MODEL).trim()) ||
     "";
-  return raw || "gpt-image-2";
+  return resolveModelFromCatalog(
+    OPENAI_IMAGE_MODELS,
+    app.openaiImageModel,
+    fromEnv || undefined,
+    DEFAULT,
+  );
 }
 
 export function resolveOpenAIImageQuality(): "low" | "medium" | "high" | "auto" {

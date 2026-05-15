@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
-import { Toaster } from "sonner";
 import {
   auth,
   db,
+  ensureSupabaseAuthRole,
   handleFirestoreError,
   OperationType,
 } from "./firebase";
@@ -22,7 +22,9 @@ import {
 } from "firebase/firestore";
 import { LoginPage } from "./components/LoginPage";
 import { PrintWorkspace } from "./features/print-workspace/PrintWorkspace";
-import type { HistoryItem } from "./types";
+import { fetchGroupedFileHistory } from "./services/fileHistory";
+import { isSupabaseConfigured } from "./lib/supabase/client";
+import type { FileHistoryGroup, HistoryItem } from "./types";
 
 export default function App() {
   useEffect(() => {
@@ -34,12 +36,34 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [groupedHistory, setGroupedHistory] = useState<FileHistoryGroup[]>([]);
+
+  const refreshGroupedHistory = useCallback(async (uid: string) => {
+    if (!isSupabaseConfigured()) {
+      setGroupedHistory([]);
+      return;
+    }
+    try {
+      const groups = await fetchGroupedFileHistory(uid);
+      setGroupedHistory(groups);
+    } catch (err) {
+      console.warn("Istoric Supabase:", err);
+      setGroupedHistory([]);
+      console.error("Istoric indisponibil. Deloghează-te, reloghează-te și reîncarcă pagina.");
+    }
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setIsAuthReady(true);
       if (u) {
+        try {
+          await ensureSupabaseAuthRole(u);
+        } catch {
+          /* token refresh best-effort */
+        }
+        void refreshGroupedHistory(u.uid);
         const userDoc = doc(db, "users", u.uid);
         try {
           await setDoc(
@@ -71,14 +95,15 @@ export default function App() {
         );
       } else {
         setHistory([]);
+        setGroupedHistory([]);
       }
     });
     return unsubscribe;
-  }, []);
+  }, [refreshGroupedHistory]);
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-[#0d1117] flex items-center justify-center">
+      <div className="flex h-dvh min-h-0 flex-1 flex-col items-center justify-center bg-[#0d1117]">
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-amber-500/20 border-t-amber-500 rounded-full animate-spin" />
           <p className="text-sm font-medium text-[#94a3b8] animate-pulse">Initializing print1.ai...</p>
@@ -89,17 +114,20 @@ export default function App() {
 
   if (!user) {
     return (
-      <>
-        <Toaster position="top-right" theme="dark" />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         <LoginPage />
-      </>
+      </div>
     );
   }
 
   return (
-    <>
-      <Toaster position="top-right" theme="dark" />
-      <PrintWorkspace user={user} history={history} />
-    </>
+    <div className="flex h-dvh min-h-0 w-full flex-1 flex-col overflow-hidden">
+      <PrintWorkspace
+        user={user}
+        history={history}
+        groupedHistory={groupedHistory}
+        onHistoryRefresh={() => void refreshGroupedHistory(user.uid)}
+      />
+    </div>
   );
 }

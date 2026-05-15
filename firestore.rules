@@ -71,7 +71,7 @@ service cloud.firestore {
     }
 
     function isValidPrintJob(data) {
-      return hasOnlyAllowedFields(['id', 'userId', 'fileName', 'format', 'settings', 'analysis', 'createdAt', 'timestamp', 'type', 'isApproved']) &&
+      return hasOnlyAllowedFields(['id', 'userId', 'fileName', 'format', 'settings', 'analysis', 'createdAt', 'timestamp', 'type']) &&
              data.userId is string && data.userId == request.auth.uid &&
              data.fileName is string && data.fileName.size() > 0 && data.fileName.size() < 255 &&
              (data.createdAt == request.time || isValidTimestamp(data.createdAt));

@@ -27,7 +27,9 @@ import {
 import * as THREE from 'three';
 import { cn } from '../lib/utils';
 import { MockupType, MOCKUP_TYPES } from '../types';
-import { generateCustomMockup } from '../services/gemini';
+import { generateCustomMockup, refineGeminiImageFromPrompt, type MockupGenerationResult } from '../services/gemini';
+import * as openaiPrint from '../services/openaiPrint';
+import { AiDualCompareDialog } from './AiDualCompareDialog';
 import { toast } from 'sonner';
 
 // --- 3D Mockup Components ---
@@ -174,24 +176,49 @@ export function MockupViewer({ designImage, onClose, initialType, hasKey, handle
   const [customPrompt, setCustomPrompt] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  const [dualPicker, setDualPicker] = useState<Extract<MockupGenerationResult, { kind: 'dual' }> | null>(null);
+
   const generateMockup = async (prompt?: string) => {
     setIsGenerating(true);
     setError(null);
-    const loadingToast = toast.loading("AI is generating your mockup...");
+    const loadingToast = toast.loading("Se generează mockupul…");
     try {
       const result = await generateCustomMockup(
         prompt || `A professional studio mockup of a ${type} with this design`,
         designImage,
         localStorage.getItem('gemini_api_key') || undefined
       );
-      
-      if (result) {
-        setMockupUrl(result);
+
+      if (result.kind === 'dual') {
+        toast.dismiss(loadingToast);
+        const gUrl = result.gemini.imageUrl;
+        const oUrl = result.openai.imageUrl;
+        if (!gUrl && !oUrl) {
+          const blob = `${result.gemini.error || ''} ${result.openai.error || ''}`;
+          const invalidKey =
+            blob.includes('INVALID_API_KEY') ||
+            /invalid api key|401|incorrect api key/i.test(blob);
+          if (invalidKey) {
+            setError('API Key invalid. Verifică setările.');
+            toast.error('Cheie API invalidă');
+            handleSelectKey();
+          } else {
+            setError('Ambele generări au eșuat. Încearcă din nou.');
+            toast.error('Mockup: ambele modele au eșuat');
+          }
+          return;
+        }
+        setDualPicker(result);
+        return;
+      }
+
+      if (result.imageUrl) {
+        setMockupUrl(result.imageUrl);
         setViewMode('ai');
         toast.dismiss(loadingToast);
-        toast.success("Mockup generated!");
+        toast.success(`Mockup gata (${result.provider === 'gemini' ? 'Gemini' : 'OpenAI'}).`);
       } else {
-        throw new Error("EMPTY_RESPONSE");
+        throw new Error('EMPTY_RESPONSE');
       }
     } catch (err: any) {
       console.error("Mockup failed:", err);
@@ -215,11 +242,34 @@ export function MockupViewer({ designImage, onClose, initialType, hasKey, handle
     }
   };
 
+  const finalizeDualPickGemini = (url: string | null) => {
+    if (!url) {
+      toast.error('Varianta aleasă nu are imagine.');
+      return;
+    }
+    setMockupUrl(url);
+    setViewMode('ai');
+    setDualPicker(null);
+    toast.success('Ai ales varianta Gemini.');
+  };
+
+  const finalizeDualPickOpenai = (url: string | null) => {
+    if (!url) {
+      toast.error('Varianta aleasă nu are imagine.');
+      return;
+    }
+    setMockupUrl(url);
+    setViewMode('ai');
+    setDualPicker(null);
+    toast.success('Ai ales varianta OpenAI.');
+  };
+
   return (
     <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
+      initial={{ opacity: 0, scale: 0.94, y: 12 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.96, y: 8 }}
+      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
       className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl flex items-center justify-center p-4 sm:p-8"
     >
       <div className="bg-[#16191e] border border-[#2d333b] rounded-3xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
@@ -430,6 +480,22 @@ export function MockupViewer({ designImage, onClose, initialType, hasKey, handle
           </div>
         </div>
       </div>
+
+      {dualPicker && (
+        <AiDualCompareDialog
+          open
+          onClose={() => setDualPicker(null)}
+          title="Compară mockup-urile (mod debug)"
+          subtitle="Alege varianta sau rafinează punctual fiecare imagine înainte de a decide."
+          gemini={dualPicker.gemini}
+          openai={dualPicker.openai}
+          onPickGemini={finalizeDualPickGemini}
+          onPickOpenai={finalizeDualPickOpenai}
+          refineWithGemini={(u, p) => refineGeminiImageFromPrompt(u, p)}
+          refineWithOpenai={(u, p) => openaiPrint.quickImageEditFromPrompt(u, p)}
+          zIndexClass="z-[200]"
+        />
+      )}
     </motion.div>
   );
 }

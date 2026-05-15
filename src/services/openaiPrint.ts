@@ -14,9 +14,8 @@ import { buildUpscaleExtendOutpaintPrompt } from "../lib/extendOutpaintPrompt";
 import { buildUpscaleRecomposePrompt } from "../lib/recomposePrompt";
 import { composeExtendCenterContain, pickCanvasSizeForMmAspect } from "../lib/upscaleCompose";
 import type { UpscaleMode } from "../types";
-
-const VISION_MODEL = "gpt-4o";
-const AGENT_MODEL = "gpt-4o-mini";
+import type { ProcessingStageReporter } from "../lib/processingStage";
+import { resolveOpenAIAgentModel, resolveOpenAIVisionModel } from "../lib/openaiTextConfig";
 
 function getClient(): OpenAI {
   const apiKey = resolveOpenAIApiKey().trim();
@@ -66,6 +65,20 @@ async function imageEditSingle(
   return `data:image/png;base64,${b64}`;
 }
 
+/** Un singur pas images.edit — pentru rafinări rapide din UI (comparare duală). */
+export async function quickImageEditFromPrompt(
+  imageData: string,
+  userInstruction: string,
+  widthMmHint = 210,
+  heightMmHint = 297
+): Promise<string | null> {
+  const prompt = `Edit this image for professional print output. Apply the user's change precisely. No watermarks; preserve readability.
+
+User instruction:
+${userInstruction}`;
+  return imageEditSingle(imageData, prompt, widthMmHint, heightMmHint);
+}
+
 type CritiqueContext = {
   intentSummary: string;
   referenceForCritique: string;
@@ -107,7 +120,7 @@ promptAddendum: concise English instructions for the NEXT image-edit prompt (emp
 
   try {
     const completion = await client.chat.completions.create({
-      model: VISION_MODEL,
+      model: resolveOpenAIVisionModel(),
       response_format: { type: "json_object" },
       messages: [
         {
@@ -144,14 +157,17 @@ async function imageEditFromDataUrlWithQualityLoop(
   basePrompt: string,
   widthMmHint: number,
   heightMmHint: number,
-  critique: CritiqueContext
+  critique: CritiqueContext,
+  reporter?: ProcessingStageReporter,
 ): Promise<string | null> {
   const maxPasses = resolveOpenAIImageMaxPasses();
   const useCritique = resolveOpenAIImageCritiqueEnabled();
+  const model = resolveOpenAIImageModel();
   let prompt = basePrompt;
   let last: string | null = null;
 
   for (let pass = 0; pass < maxPasses; pass++) {
+    reporter?.progressStep?.(pass, maxPasses, `OpenAI (${model}): generare ${pass + 1}/${maxPasses}…`);
     const out = await imageEditSingle(
       editSourceDataUrl,
       prompt,
@@ -163,19 +179,25 @@ async function imageEditFromDataUrlWithQualityLoop(
 
     if (!useCritique || pass >= maxPasses - 1) break;
 
+    reporter?.stage(`OpenAI: verificare calitate (pas ${pass + 1})…`);
     const c = await critiqueGeneratedImage(
       out,
       critique.intentSummary,
       critique.referenceForCritique
     );
-    if (!c.shouldRegenerate || !String(c.promptAddendum || "").trim()) break;
+    if (!c.shouldRegenerate || !String(c.promptAddendum || "").trim()) {
+      reporter?.stage("OpenAI: verificare OK, nu e nevoie de regenerare.");
+      break;
+    }
 
+    reporter?.stage(`OpenAI: regenerare cu corecții (${pass + 2}/${maxPasses})…`);
     const issueBlock =
       c.issues.length > 0
         ? c.issues.map((x, i) => `${i + 1}. ${x}`).join("\n")
         : "(see corrections below)";
     prompt = `${basePrompt}\n\n--- QA refinement (attempt ${pass + 2} of ${maxPasses}) ---\nObserved issues:\n${issueBlock}\n\nApply these corrections in the next render:\n${c.promptAddendum}`;
   }
+  if (last) reporter?.stage("OpenAI: imagine finalizată.");
   return last;
 }
 
@@ -196,10 +218,14 @@ Reply with a single JSON object ONLY (no markdown), with keys:
 - recommendations: string[]
 - canUpscaleHelp: boolean
 - colorWarnings: array of { "color": string, "reason": string }
-- boundingBoxes: array of { "box_2d": [number, number, number, number], "label": string } where box_2d is [ymin, xmin, ymax, xmax] on a 0-1000 normalized scale`;
+- boundingBoxes: array of { "box_2d": [number, number, number, number], "label": string } where box_2d is [ymin, xmin, ymax, xmax] on a 0-1000 normalized scale
+
+Writing rules for issues and recommendations:
+- Use concrete, technical phrases (e.g. effective resolution vs target DPI, trim/safe margins, blur, banding, out-of-gamut hues, small text size).
+- Do NOT use vague one-word judgments or misspelled shorthand alone, such as: "slab", "slabă", "bun", "bon", "prost", "ok", "naspa" as a full line. Avoid standalone subjective ratings; pair every claim with a measurable detail.`;
 
     const completion = await client.chat.completions.create({
-      model: VISION_MODEL,
+      model: resolveOpenAIVisionModel(),
       response_format: { type: "json_object" },
       messages: [
         {
@@ -254,7 +280,7 @@ Return ONE JSON object only with keys:
 - action: one of process, download, request_file, upscale, imposition, none`;
 
   const completion = await client.chat.completions.create({
-    model: AGENT_MODEL,
+    model: resolveOpenAIAgentModel(),
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: system },
@@ -299,10 +325,12 @@ export async function upscaleImage(
   targetH: number,
   formatName: string,
   bleedMm: number,
-  mode: UpscaleMode = "extend"
+  mode: UpscaleMode = "extend",
+  reporter?: ProcessingStageReporter,
 ) {
   if (mode === "extend") {
     const { width: cw, height: ch } = pickCanvasSizeForMmAspect(targetW, targetH);
+    reporter?.stage(`OpenAI: compun canvas extend (${cw}×${ch}px)…`);
     const composite = await composeExtendCenterContain(imageData, cw, ch);
     const prompt = buildUpscaleExtendOutpaintPrompt({
       formatName,
@@ -313,9 +341,10 @@ export async function upscaleImage(
     return imageEditFromDataUrlWithQualityLoop(composite, prompt, targetW, targetH, {
       intentSummary: prompt,
       referenceForCritique: composite,
-    });
+    }, reporter);
   }
 
+  reporter?.stage("OpenAI: pregătesc upscale recompose…");
   const prompt = buildUpscaleRecomposePrompt({
     formatName,
     targetW,
@@ -325,15 +354,17 @@ export async function upscaleImage(
   return imageEditFromDataUrlWithQualityLoop(imageData, prompt, targetW, targetH, {
     intentSummary: prompt,
     referenceForCritique: imageData,
-  });
+  }, reporter);
 }
 
 export async function generativeFill(
   imageData: string,
   bleedMm: number,
   targetWidthMm: number,
-  targetHeightMm: number
+  targetHeightMm: number,
+  reporter?: ProcessingStageReporter,
 ) {
+  reporter?.stage(`OpenAI: extind bleed (${bleedMm}mm pe latură)…`);
   const prompt = `DESIGN EXTENSION for print bleed (~${bleedMm}mm on each side). The central ${targetWidthMm}×${targetHeightMm} mm artwork must stay pixel-identical — only the outer bleed band is edited.
 
 You must continue REAL graphic structure from the edges (sunbursts, rays, stripes, frames, halftone, texture, ornamental borders) into the new area. FORBIDDEN: wide flat cream/beige/paper voids next to busy patterned edges; no white “picture frame” halo. Seamless continuation of the same visual language.`;
@@ -342,7 +373,7 @@ You must continue REAL graphic structure from the edges (sunbursts, rays, stripe
   return imageEditFromDataUrlWithQualityLoop(imageData, prompt, totalW, totalH, {
     intentSummary: prompt,
     referenceForCritique: imageData,
-  });
+  }, reporter);
 }
 
 export async function generateCustomMockup(

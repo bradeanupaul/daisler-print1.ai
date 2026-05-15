@@ -15,6 +15,7 @@ export default defineConfig(({mode}) => {
       'process.env.OPENAI_IMAGE_QUALITY': JSON.stringify(env.OPENAI_IMAGE_QUALITY || ''),
       'process.env.OPENAI_IMAGE_MAX_PASSES': JSON.stringify(env.OPENAI_IMAGE_MAX_PASSES || ''),
       'process.env.OPENAI_IMAGE_CRITIQUE': JSON.stringify(env.OPENAI_IMAGE_CRITIQUE || ''),
+      'process.env.GEMINI_IMAGE_MODEL': JSON.stringify(env.GEMINI_IMAGE_MODEL || ''),
     },
     resolve: {
       alias: {

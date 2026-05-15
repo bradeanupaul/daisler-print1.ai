@@ -5,6 +5,10 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+html {
+  height: 100%;
+}
+
 :root {
   --bg: #0f1115;
   --card: #1a1d23;
@@ -12,9 +16,23 @@
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --border: #2d333b;
+  --surface-elevated: #16191e;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+}
+
+#root {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
   background-color: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -46,5 +64,79 @@ body {
 .simulate-cmyk {
   filter: saturate(0.8) contrast(0.95) brightness(0.9) sepia(0.05);
   transition: filter 0.5s ease;
+}
+
+/* Micro-interacțiuni: apăsări, hover lin, câmpuri */
+button:not(:disabled):not([aria-busy="true"]),
+[role="button"]:not([aria-disabled="true"]):not(:disabled),
+[role="menuitem"]:not(:disabled),
+[role="option"],
+summary {
+  transition:
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.18s ease,
+    opacity 0.2s ease,
+    box-shadow 0.22s ease;
+}
+
+button:not(:disabled):active:not([aria-busy="true"]),
+[role="button"]:not([aria-disabled="true"]):active,
+[role="menuitem"]:active,
+[role="option"]:active {
+  transform: scale(0.97);
+}
+
+a[href] {
+  transition: color 0.18s ease, opacity 0.18s ease, transform 0.16s ease;
+}
+
+a[href]:active {
+  transform: scale(0.98);
+}
+
+input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+select,
+textarea {
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.22s ease,
+    background-color 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:not(:disabled):active,
+  [role="button"]:not([aria-disabled="true"]):active,
+  [role="menuitem"]:active,
+  [role="option"]:active,
+  a[href]:active {
+    transform: none;
+  }
+
+  button,
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  summary,
+  a[href],
+  input,
+  select,
+  textarea {
+    transition-duration: 0.01ms;
+  }
+}
+
+@keyframes processing-indeterminate-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(380%);
+  }
+}
+
+.processing-indeterminate-bar {
+  animation: processing-indeterminate-slide 1.35s ease-in-out infinite;
 }
 

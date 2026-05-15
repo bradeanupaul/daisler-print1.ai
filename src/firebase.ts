@@ -20,14 +20,47 @@ function getConfiguredFirestore(app: FirebaseApp) {
 }
 
 // Initialize Firebase SDK
-const app = initializeApp(config);
+export const app = initializeApp(config);
 export const db = getConfiguredFirestore(app);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
 
+/** Claim `role: authenticated` pentru Supabase — apelat la login / relogare. */
+export async function ensureSupabaseAuthRole(user: FirebaseUser): Promise<void> {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  const supabaseKey = (
+    (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ||
+    (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined)
+  )?.trim();
+
+  if (supabaseUrl?.trim() && supabaseKey) {
+    try {
+      const idToken = await user.getIdToken();
+      const res = await fetch(`${supabaseUrl.replace(/\/$/, "")}/functions/v1/ensure-firebase-role`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          apikey: supabaseKey,
+        },
+      });
+      if (!res.ok) {
+        console.warn("ensure-firebase-role:", await res.text());
+      }
+    } catch (error) {
+      console.warn("ensure-firebase-role:", error);
+    }
+  }
+
+  await user.getIdToken(true);
+}
+
 // Auth Helpers
-export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
+export const signInWithGoogle = async () => {
+  const cred = await signInWithPopup(auth, googleProvider);
+  await ensureSupabaseAuthRole(cred.user);
+  return cred;
+};
 export const logOut = () => signOut(auth);
 
 // Firestore Error Handling

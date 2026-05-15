@@ -96,11 +96,13 @@ export const MOCKUP_TYPES = [
   { id: 'custom', label: 'Prompt magic', icon: Sparkles }
 ];
 
+/** @deprecated Folosit doar dacă Supabase nu e configurat; preferă FileHistoryGroup. */
 export interface HistoryItem {
   id: string;
   fileName: string;
   format: string;
   timestamp: any;
   type: string;
-  isApproved?: boolean;
 }
+
+export type { FileHistoryGroup, FileHistoryAsset } from "./services/fileHistory";

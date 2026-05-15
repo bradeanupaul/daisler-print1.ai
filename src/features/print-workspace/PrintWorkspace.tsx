@@ -9,6 +9,7 @@ import {
   Sparkles, 
   ChevronRight, 
   ChevronLeft,
+  ChevronDown,
   Mic, 
   RefreshCw, 
   Scissors as ScissorsIcon,
@@ -34,7 +35,11 @@ import {
   LogOut,
   Loader2,
   Image as ImageIcon,
-  PanelLeft
+  PanelLeft,
+  PanelRight,
+  Trash2,
+  Bot,
+  Cpu,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useDropzone } from 'react-dropzone';
@@ -58,10 +63,21 @@ import {
   MOCKUP_TYPES, 
   IMPOSITION_SHEETS,
   ProcessingSettings, 
-  PrintFormat, 
   MockupType,
-  HistoryItem
+  HistoryItem,
+  UpscaleMode,
+  FileHistoryGroup,
+  FileHistoryAsset,
 } from '../../types';
+import {
+  createSessionGroup,
+  getAssetDownloadUrl,
+  registerBlobExport,
+  registerProcessedImageFromUrl,
+  registerUpload,
+} from '../../services/fileHistory';
+import { isSupabaseConfigured } from '../../lib/supabase/client';
+import { FileHistoryDrawer } from '../../components/FileHistoryDrawer';
 import { 
   generateImpositionPDF,
   generatePrintPDF 
@@ -71,19 +87,34 @@ import {
   analyzePrintQuality, 
   upscaleImage, 
   generativeFill,
-  generateCustomMockup,
-  generateSpeech
+  generateSpeech,
+  refineGeminiImageFromPrompt,
+  type UpscaleGenerationResult,
 } from '../../services/gemini';
+import * as openaiPrint from '../../services/openaiPrint';
 import { MockupViewer } from '../../components/MockupViewer';
+import { AiSettingsModal } from '../../components/AiSettingsModal';
+import { AiDualCompareDialog } from '../../components/AiDualCompareDialog';
+import { ProcessingOverlay } from '../../components/ProcessingOverlay';
+import { useProcessingProgress } from '../../hooks/useProcessingProgress';
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
+
+const DROPDOWN_PANEL = {
+  initial: { opacity: 0, y: -10, scale: 0.96 },
+  animate: { opacity: 1, y: 0, scale: 1 },
+  exit: { opacity: 0, y: -6, scale: 0.98 },
+  transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const },
+};
 
 // --- Main App ---
 export type PrintWorkspaceProps = {
   user: FirebaseUser;
   history: HistoryItem[];
+  groupedHistory: FileHistoryGroup[];
+  onHistoryRefresh: () => void;
 };
 
-export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
+export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh }: PrintWorkspaceProps) {
   // Set up PDF.js worker
   useEffect(() => {
     if (pdfjs.version) {
@@ -96,21 +127,41 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
   const [originalDimensions, setOriginalDimensions] = useState<{ width: number, height: number } | null>(null);
   const [isUpscaleNeeded, setIsUpscaleNeeded] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const processing = useProcessingProgress();
+  const isProcessing = processing.isActive;
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<any>(null);
   const [tracedSvg, setTracedSvg] = useState<string | null>(null);
   const [showMockup, setShowMockup] = useState(false);
   const [mockupType, setMockupType] = useState<MockupType>('hoodie');
   const [showHistory, setShowHistory] = useState(false);
+  const [rightToolsOpen, setRightToolsOpen] = useState(true);
+  const [rightToolsTab, setRightToolsTab] = useState<"agent" | "quality">("agent");
   const [hasKey, setHasKey] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [isApproved, setIsApproved] = useState(false);
   const [totalPages, setTotalPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [historyLoadingAssetId, setHistoryLoadingAssetId] = useState<string | null>(null);
+  const [historySelectedAssetId, setHistorySelectedAssetId] = useState<string | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const [mockupMenuOpen, setMockupMenuOpen] = useState(false);
+  const mockupMenuRef = useRef<HTMLDivElement>(null);
+  const [formatPickerOpen, setFormatPickerOpen] = useState(false);
+  const formatPickerRef = useRef<HTMLDivElement>(null);
+  const [sheetPickerOpen, setSheetPickerOpen] = useState(false);
+  const sheetPickerRef = useRef<HTMLDivElement>(null);
+  const [showAiSettings, setShowAiSettings] = useState(false);
+  type WorkspaceImageDualFlow = "upscale" | "generative_fill";
+  const [dualImagePicker, setDualImagePicker] = useState<{
+    flow: WorkspaceImageDualFlow;
+    dual: Extract<UpscaleGenerationResult, { kind: "dual" }>;
+  } | null>(null);
+  const [aiUpscaleMenuOpen, setAiUpscaleMenuOpen] = useState(false);
+  const aiUpscaleMenuRef = useRef<HTMLDivElement>(null);
 
   const [settings, setSettings] = useState<ProcessingSettings>({
     ...DEFAULT_PRINT_SETTINGS,
@@ -118,10 +169,25 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
 
   const imgRef = useRef<HTMLImageElement>(null);
   const agentInputRef = useRef<HTMLInputElement>(null);
+  const activeHistoryGroupIdRef = useRef<string | null>(null);
   // API Key Check (Gemini din .env / storage sau OpenAI)
   useEffect(() => {
     setHasKey(hasAnyAiKeyConfigured());
   }, []);
+
+  useEffect(() => {
+    if (!exportMenuOpen && !mockupMenuOpen && !formatPickerOpen && !sheetPickerOpen && !aiUpscaleMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (exportMenuRef.current && !exportMenuRef.current.contains(t)) setExportMenuOpen(false);
+      if (mockupMenuRef.current && !mockupMenuRef.current.contains(t)) setMockupMenuOpen(false);
+      if (formatPickerRef.current && !formatPickerRef.current.contains(t)) setFormatPickerOpen(false);
+      if (sheetPickerRef.current && !sheetPickerRef.current.contains(t)) setSheetPickerOpen(false);
+      if (aiUpscaleMenuRef.current && !aiUpscaleMenuRef.current.contains(t)) setAiUpscaleMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [exportMenuOpen, mockupMenuOpen, formatPickerOpen, sheetPickerOpen, aiUpscaleMenuOpen]);
   const handleSelectKey = () => {
     const key = prompt(
       "Introdu cheia API:\n- OpenAI (începe cu sk-…, ex. sk-proj-…)\n- sau Google Gemini (începe cu AIza…)"
@@ -271,21 +337,102 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       }
       
       toast.success(`File "${uploadedFile.name}" uploaded successfully`);
-    }
-  }, [renderPDFPage]);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
+      if (user && isSupabaseConfigured()) {
+        try {
+          const { groupId } = await registerUpload(user.uid, uploadedFile, settings.formatId);
+          activeHistoryGroupIdRef.current = groupId;
+          onHistoryRefresh();
+        } catch (err) {
+          console.warn("registerUpload:", err);
+          toast.error(
+            err instanceof Error ? err.message : "Nu s-a putut salva în istoric. Încearcă sign out + sign in.",
+          );
+        }
+      }
+    }
+  }, [renderPDFPage, user, settings.formatId, onHistoryRefresh]);
+
+  const revokeObjectUrl = (url: string | null | undefined) => {
+    if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+  };
+
+  const clearWorkspaceFile = useCallback(() => {
+    setFile(null);
+    setOriginalBuffer(null);
+    setPreviewUrl((prev) => {
+      revokeObjectUrl(prev);
+      return null;
+    });
+    setProcessedUrl((prev) => {
+      revokeObjectUrl(prev);
+      return null;
+    });
+    setOriginalDimensions(null);
+    setTotalPages(0);
+    setCurrentPage(1);
+    setAnalysis(null);
+    setTracedSvg(null);
+    setIsUpscaleNeeded(false);
+    processing.stop();
+    setIsAnalyzing(false);
+    activeHistoryGroupIdRef.current = null;
+    setHistorySelectedAssetId(null);
+  }, []);
+
+  const ensureHistoryGroup = useCallback(async (): Promise<string | null> => {
+    if (!user || !isSupabaseConfigured()) return null;
+    if (activeHistoryGroupIdRef.current) return activeHistoryGroupIdRef.current;
+    if (!file) return null;
+    const groupId = await createSessionGroup(user.uid, file.name, settings.formatId);
+    activeHistoryGroupIdRef.current = groupId;
+    return groupId;
+  }, [user, file, settings.formatId]);
+
+  const persistProcessedToHistory = useCallback(
+    async (
+      imageUrl: string,
+      sourceKind: "upscale" | "generative_fill" | "processed_preview",
+      suffix: string,
+      metadata?: Record<string, unknown>,
+    ) => {
+      if (!user || !isSupabaseConfigured()) return;
+      try {
+        const groupId = await ensureHistoryGroup();
+        if (!groupId) return;
+        const base = (file?.name || "document").replace(/\.[^/.]+$/, "");
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+        const fileName = `${base}_${suffix}_${stamp}.png`;
+        await registerProcessedImageFromUrl(
+          user.uid,
+          groupId,
+          imageUrl,
+          sourceKind,
+          fileName,
+          settings.formatId,
+          metadata,
+        );
+        onHistoryRefresh();
+      } catch (err) {
+        console.warn("persistProcessedToHistory:", err);
+      }
+    },
+    [user, file, settings.formatId, ensureHistoryGroup, onHistoryRefresh],
+  );
+
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({ 
     onDrop,
     accept: {
       'image/*': ['.png', '.jpg', '.jpeg', '.webp'],
       'application/pdf': ['.pdf']
     },
-    multiple: false
+    multiple: false,
+    noClick: !!file,
   });
 
   const handleDownload = async () => {
     if (!originalBuffer || !file) return;
-    setIsProcessing(true);
+    processing.begin("Generez PDF tipăribil…");
     try {
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
       const width = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
@@ -296,6 +443,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       
       // Handle SVG files specifically: pdf-lib doesn't support them directly,
       // so we must rasterize them to a high-res PNG first for embedding.
+      processing.stage("Pregătesc conținutul fișierului…");
       if (file.type.includes('svg') || file.name.toLowerCase().endsWith('.svg')) {
         const svgText = new TextDecoder().decode(originalBuffer);
         const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
@@ -318,6 +466,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
         bufferToUse = await response.arrayBuffer();
       }
 
+      processing.stage("Generez PDF cu bleed și marcaje…");
       const pdfBytes = await generatePrintPDF(
         [bufferToUse],
         width,
@@ -347,27 +496,84 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
             fileName: file.name,
             format: settings.formatId,
             createdAt: serverTimestamp(),
-            timestamp: serverTimestamp(), // Keep for ordering consistency if used
+            timestamp: serverTimestamp(),
             type: 'pdf_export',
-            isApproved: isApproved
           });
         } catch (error) {
           handleFirestoreError(error, OperationType.WRITE, historyPath);
         }
+
+        if (isSupabaseConfigured()) {
+          const pdfBlob = new Blob([pdfBytes], { type: "application/pdf" });
+          await registerBlobExport(
+            user.uid,
+            activeHistoryGroupIdRef.current,
+            `print_${file.name.split(".")[0]}.pdf`,
+            "pdf_export",
+            pdfBlob,
+            settings.formatId,
+          );
+          onHistoryRefresh();
+        }
       }
       
+      processing.stage("PDF generat cu succes.");
       toast.success("Print-ready PDF generated!");
     } catch (err) {
       console.error(err);
       toast.error("Failed to generate PDF");
-    } finally {
-      setIsProcessing(false);
+      processing.stop();
+      return;
+    }
+    processing.done();
+  };
+
+  const handleExportPreviewImage = async () => {
+    if (!processedUrl) {
+      toast.error("Nu există previzualizare procesată.");
+      return;
+    }
+    try {
+      const res = await fetch(processedUrl);
+      const blob = await res.blob();
+      const mime = blob.type || "image/png";
+      const ext =
+        mime.includes("jpeg") || mime.includes("jpg")
+          ? "jpg"
+          : mime.includes("webp")
+            ? "webp"
+            : "png";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const base = (file?.name || "document").replace(/\.[^/.]+$/, "");
+      a.download = `preview_${base}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      if (user && isSupabaseConfigured() && activeHistoryGroupIdRef.current) {
+        const base = (file?.name || "document").replace(/\.[^/.]+$/, "");
+        await registerBlobExport(
+          user.uid,
+          activeHistoryGroupIdRef.current,
+          `preview_${base}.${ext}`,
+          "image_export",
+          blob,
+          settings.formatId,
+        );
+        onHistoryRefresh();
+      }
+
+      toast.success("Imagine descărcată.");
+    } catch (err) {
+      console.error(err);
+      toast.error("Nu s-a putut exporta imaginea.");
     }
   };
 
   const handleImposition = async () => {
     if (!originalBuffer || !file) return;
-    setIsProcessing(true);
+    processing.begin("Calculez imposiția pe coală…");
     const toastId = toast.loading("Calculating optimal imposition...");
     try {
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
@@ -382,6 +588,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       let finalRows = settings.impositionRows || 1;
       let finalCols = settings.impositionCols || 1;
 
+      processing.stage("Calculez rânduri și coloane pe coală…");
       if (settings.autoMaximize) {
         // Try normal orientation
         const cols1 = Math.floor((sheetWidth + spacing) / (itemW + spacing));
@@ -416,6 +623,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
         }
       }
 
+      processing.stage("Generez PDF de imposiție…");
       const pdfBytes = await generateImpositionPDF(
         originalBuffer,
         itemW,
@@ -440,15 +648,17 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       a.download = `imposition_${file.name.split('.')[0]}.pdf`;
       a.click();
       
+      processing.stage(`Imposiție: ${finalRows * finalCols} bucăți pe coală.`);
       toast.dismiss(toastId);
       toast.success(`Imposition complete: ${finalRows * finalCols} items on sheet.`);
     } catch (err: any) {
       console.error(err);
       toast.dismiss(toastId);
       toast.error(err.message || "Imposition failed");
-    } finally {
-      setIsProcessing(false);
+      processing.stop();
+      return;
     }
+    processing.done();
   };
 
   const handleAIAnalysis = async (urlOverride?: string) => {
@@ -456,12 +666,15 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
     if (!urlToAnalyze) return;
     
     setIsAnalyzing(true);
+    processing.begin("Analizez calitatea pentru tipar…");
     try {
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
       const width = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
       const height = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
 
+      processing.stage("Trimit imaginea la analiza AI…");
       const result = await analyzePrintQuality(urlToAnalyze, settings.dpi || 300, width, height);
+      processing.stage("Procesez rezultatul analizei…");
       if (!result) throw new Error("Analysis failed");
       
       setAnalysis(result);
@@ -480,7 +693,13 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                ymin < marginThreshold || ymax > 1000 - marginThreshold;
       });
 
-      let voiceMessage = `Analiză completă. Calitatea este ${result.currentEstimatedQuality === 'high' ? 'foarte bună' : result.currentEstimatedQuality === 'medium' ? 'acceptabilă' : 'scăzută'}.`;
+      const nivelTipar =
+        result.currentEstimatedQuality === "high"
+          ? "nivel ridicat de siguranță pentru tipar"
+          : result.currentEstimatedQuality === "medium"
+            ? "nivel mediu — merită verificat punct cu punct"
+            : "nivel redus — există riscuri clare pentru tipar";
+      let voiceMessage = `Analiză completă. Estimare tehnică: ${nivelTipar}. Detalii în tabul Calitate.`;
       
       if (dangerousItems.length > 0) {
         voiceMessage += ` Atenție: am detectat ${dangerousItems.length} elemente importante prea aproape de marginea de tăiere.`;
@@ -501,6 +720,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       }
 
     } catch (err: any) {
+      processing.stop();
       if (err.message === "QUOTA_EXHAUSTED") {
         toast.error("AI Quota exceeded. Please try again later or use your own API key.");
       } else {
@@ -508,12 +728,134 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       }
     } finally {
       setIsAnalyzing(false);
+      if (processing.isActive) processing.done();
     }
   };
 
-  const handleUpscale = async () => {
+  const loadHistoryAsset = useCallback(
+    async (group: FileHistoryGroup, asset: FileHistoryAsset) => {
+      setHistoryLoadingAssetId(asset.id);
+      processing.begin("Încarc fișierul din istoric…");
+      try {
+        processing.stage("Obțin link de descărcare…");
+        const downloadUrl = await getAssetDownloadUrl(asset);
+        const res = await fetch(downloadUrl);
+        if (!res.ok) throw new Error("Descărcarea a eșuat.");
+
+        const blob = await res.blob();
+        const fileName = asset.file_name || "history-file";
+        const mime = asset.mime_type || blob.type || "application/octet-stream";
+        const isPdf = mime.includes("pdf") || fileName.toLowerCase().endsWith(".pdf");
+        const isSvg = mime.includes("svg") || fileName.toLowerCase().endsWith(".svg");
+        const isImage = mime.startsWith("image/") || isSvg;
+
+        if (!isPdf && !isImage) {
+          throw new Error("Tip de fișier neacceptat în workspace.");
+        }
+
+        activeHistoryGroupIdRef.current = group.id;
+        setHistorySelectedAssetId(asset.id);
+
+        const formatId = group.format_id || asset.format_id;
+        if (formatId) {
+          setSettings((s) => ({ ...s, formatId }));
+        }
+
+        setPreviewUrl((prev) => {
+          revokeObjectUrl(prev);
+          return null;
+        });
+        setProcessedUrl((prev) => {
+          revokeObjectUrl(prev);
+          return null;
+        });
+        setAnalysis(null);
+        setTracedSvg(null);
+        setIsUpscaleNeeded(false);
+        setCurrentPage(1);
+
+        const buffer = await blob.arrayBuffer();
+        const historyFile = new File([blob], fileName, {
+          type: isPdf ? "application/pdf" : mime,
+        });
+        setFile(historyFile);
+        setOriginalBuffer(buffer);
+
+        if (isPdf) {
+          processing.stage("Randez pagina PDF…");
+          const pages = await renderPDFPage(buffer, 1);
+          setTotalPages(pages);
+        } else {
+          processing.stage("Pregătesc previzualizarea…");
+          setTotalPages(0);
+          let imageUrl: string;
+          if (isSvg) {
+            const text = new TextDecoder().decode(buffer);
+            const svgBlob = new Blob([text], { type: "image/svg+xml" });
+            const svgUrl = URL.createObjectURL(svgBlob);
+            try {
+              imageUrl = await rasterizeToPNG(svgUrl);
+            } finally {
+              URL.revokeObjectURL(svgUrl);
+            }
+          } else {
+            imageUrl = URL.createObjectURL(blob);
+          }
+          setPreviewUrl(imageUrl);
+          setProcessedUrl(imageUrl);
+
+          const effectiveFormatId = formatId ?? settings.formatId;
+          const img = new Image();
+          img.onload = () => {
+            setOriginalDimensions({ width: img.width, height: img.height });
+            handleAIAnalysis(imageUrl);
+            const currentFormat = PRINT_FORMATS.find((f) => f.id === effectiveFormatId);
+            const targetW =
+              effectiveFormatId === "custom"
+                ? settings.customWidth || 90
+                : currentFormat?.width || 90;
+            const targetH =
+              effectiveFormatId === "custom"
+                ? settings.customHeight || 50
+                : currentFormat?.height || 50;
+            const targetDpi = settings.dpi || 300;
+            const effectiveDpi = Math.min(
+              img.width / (targetW / 25.4),
+              img.height / (targetH / 25.4),
+            );
+            if (effectiveDpi < targetDpi * 0.9) {
+              setIsUpscaleNeeded(true);
+              toast.info(
+                `Rezoluție scăzută (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`,
+              );
+            }
+          };
+          img.src = imageUrl;
+        }
+
+        setShowHistory(false);
+        toast.success(`Încărcat în workspace: ${fileName}`);
+      } catch (err) {
+        console.warn("loadHistoryAsset:", err);
+        toast.error(
+          err instanceof Error ? err.message : "Nu s-a putut încărca fișierul din istoric.",
+        );
+        processing.stop();
+      } finally {
+        setHistoryLoadingAssetId(null);
+        if (processing.isActive) processing.done();
+      }
+    },
+    [renderPDFPage, rasterizeToPNG, settings.formatId, settings.customWidth, settings.customHeight, settings.dpi, processing],
+  );
+
+  const handleUpscale = async (modeOverride?: UpscaleMode) => {
     if (!previewUrl) return;
-    setIsProcessing(true);
+    const mode = modeOverride ?? settings.upscaleMode ?? "extend";
+    if (modeOverride) {
+      setSettings((s) => ({ ...s, upscaleMode: modeOverride }));
+    }
+    processing.begin(mode === "extend" ? "Pornesc AI Upscale (extend)…" : "Pornesc AI Upscale (recompose)…");
     const toastId = toast.loading("Symmetric AI Restoration in progress...");
     try {
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
@@ -528,59 +870,168 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
         targetH,
         formatName,
         bleed,
-        settings.upscaleMode ?? "extend"
+        mode,
+        processing.getReporter(),
       );
-      if (result) {
-        setProcessedUrl(result);
+
+      if (result.kind === "dual") {
+        toast.dismiss(toastId);
+        processing.stage("Variante Gemini și OpenAI gata — alege în dialog.");
+        const gUrl = result.gemini.imageUrl;
+        const oUrl = result.openai.imageUrl;
+        if (!gUrl && !oUrl) {
+          const blob = `${result.gemini.error || ""} ${result.openai.error || ""}`;
+          const invalidKey =
+            blob.includes("INVALID_API_KEY") ||
+            /invalid api key|401|incorrect api key/i.test(blob);
+          if (invalidKey) {
+            toast.error("Cheie API invalidă");
+            handleSelectKey();
+          } else {
+            toast.error("Upscale: ambele modele au eșuat");
+          }
+          processing.stop();
+          return;
+        }
+        processing.done();
+        setDualImagePicker({ flow: "upscale", dual: result });
+        return;
+      }
+
+      if (result.imageUrl) {
+        setProcessedUrl(result.imageUrl);
         setIsUpscaleNeeded(false);
         toast.dismiss(toastId);
-        toast.success("Design intelligently expanded and upscaled!");
+        processing.stage("Upscale finalizat.");
+        void persistProcessedToHistory(result.imageUrl, "upscale", `upscale_${mode}`, {
+          mode,
+          provider: result.provider,
+        });
       } else {
-        toast.dismiss(toastId);
-        toast.error("AI returned no image data. Try again.");
+        throw new Error("EMPTY_RESPONSE");
       }
     } catch (err) {
       toast.dismiss(toastId);
       toast.error("Upscale failed");
-    } finally {
-      setIsProcessing(false);
+      processing.stop();
+      return;
     }
+    processing.done();
+  };
+
+  const finalizeWorkspaceDualPickGemini = (url: string | null) => {
+    if (!url) {
+      toast.error("Varianta aleasă nu are imagine.");
+      return;
+    }
+    const flow = dualImagePicker?.flow;
+    setProcessedUrl(url);
+    if (flow === "upscale") {
+      setIsUpscaleNeeded(false);
+    }
+    const sourceKind = flow === "generative_fill" ? "generative_fill" : "upscale";
+    void persistProcessedToHistory(url, sourceKind, "pick_gemini", { provider: "gemini", flow });
+    setDualImagePicker(null);
+  };
+
+  const finalizeWorkspaceDualPickOpenai = (url: string | null) => {
+    if (!url) {
+      toast.error("Varianta aleasă nu are imagine.");
+      return;
+    }
+    const flow = dualImagePicker?.flow;
+    setProcessedUrl(url);
+    if (flow === "upscale") {
+      setIsUpscaleNeeded(false);
+    }
+    const sourceKind = flow === "generative_fill" ? "generative_fill" : "upscale";
+    void persistProcessedToHistory(url, sourceKind, "pick_openai", { provider: "openai", flow });
+    setDualImagePicker(null);
+  };
+
+  const refineWorkspaceGemini = async (imageUrl: string, instruction: string) =>
+    refineGeminiImageFromPrompt(imageUrl, instruction);
+
+  const refineWorkspaceOpenai = async (imageUrl: string, instruction: string) => {
+    const currentFormat = PRINT_FORMATS.find((f) => f.id === settings.formatId);
+    const bleed = settings.bleed || 0;
+    const w =
+      (settings.formatId === "custom" ? settings.customWidth || 90 : currentFormat?.width || 90) +
+      bleed * 2;
+    const h =
+      (settings.formatId === "custom" ? settings.customHeight || 50 : currentFormat?.height || 50) +
+      bleed * 2;
+    return openaiPrint.quickImageEditFromPrompt(imageUrl, instruction, w, h);
   };
 
   const handleGenerativeFill = async () => {
     if (!previewUrl) return;
-    setIsProcessing(true);
+    processing.begin("Pornesc generarea bleed AI…");
     const toastId = toast.loading("AI is generating bleed...");
     try {
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
       const width = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
       const height = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
 
-      const result = await generativeFill(processedUrl || previewUrl, settings.bleed || 3, width, height);
-      if (result) {
-        setProcessedUrl(result);
+      const result = await generativeFill(
+        processedUrl || previewUrl,
+        settings.bleed || 3,
+        width,
+        height,
+        processing.getReporter(),
+      );
+
+      if (result.kind === "dual") {
         toast.dismiss(toastId);
-        toast.success("Generative fill completed!");
+        processing.stage("Variante bleed gata — alege în dialog.");
+        const gUrl = result.gemini.imageUrl;
+        const oUrl = result.openai.imageUrl;
+        if (!gUrl && !oUrl) {
+          const blob = `${result.gemini.error || ""} ${result.openai.error || ""}`;
+          const invalidKey =
+            blob.includes("INVALID_API_KEY") ||
+            /invalid api key|401|incorrect api key/i.test(blob);
+          if (invalidKey) {
+            toast.error("Cheie API invalidă");
+            handleSelectKey();
+          } else {
+            toast.error("Bleed AI: ambele modele au eșuat");
+          }
+          processing.stop();
+          return;
+        }
+        processing.done();
+        setDualImagePicker({ flow: "generative_fill", dual: result });
+        return;
+      }
+
+      if (result.imageUrl) {
+        setProcessedUrl(result.imageUrl);
+        toast.dismiss(toastId);
+        processing.stage("Bleed generat.");
+        void persistProcessedToHistory(result.imageUrl, "generative_fill", "bleed_ai", {
+          provider: result.provider,
+        });
       } else {
-        toast.dismiss(toastId);
-        toast.error("AI could not generate bleed for this image.");
+        throw new Error("EMPTY_RESPONSE");
       }
     } catch (err) {
       toast.dismiss(toastId);
       toast.error("Generative fill failed");
-    } finally {
-      setIsProcessing(false);
+      processing.stop();
+      return;
     }
+    processing.done();
   };
 
   const handleTrace = () => {
     if (!previewUrl) return;
-    setIsProcessing(true);
+    processing.begin("Vectorizez imaginea…");
     ImageTracer.imageToSVG(
       previewUrl,
       (svgstr: string) => {
         setTracedSvg(svgstr);
-        setIsProcessing(false);
+        processing.done();
         toast.success("Vector tracing complete!");
       },
       { ltres: 1, qtres: 1, pathomit: 8, colorsampling: 1, numberofcolors: 16 }
@@ -637,7 +1088,7 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
     }
   };
   return (
-    <div className="min-h-screen bg-[#0d1117] text-[#e6edf3] font-sans selection:bg-amber-500/30 flex overflow-hidden">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-row overflow-hidden bg-[var(--bg)] font-sans text-[var(--text)] selection:bg-amber-500/30">
       {mobileSidebarOpen && (
         <button
           type="button"
@@ -650,18 +1101,18 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
       {/* Aside — pe mobil: drawer peste conținut; pe desktop: coloană fixă */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,calc(100vw-1.5rem))] max-w-[18rem] shrink-0 flex-col border-r border-[#2d333b] bg-[#16191e] shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-20 lg:w-72 lg:max-w-none lg:translate-x-0 lg:shadow-none",
+          "fixed inset-y-0 left-0 z-40 flex min-h-0 w-[min(20rem,calc(100vw-1.25rem))] max-w-[18rem] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-elevated)] shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-20 lg:h-full lg:w-72 lg:max-w-none lg:translate-x-0 lg:shadow-none",
           mobileSidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        <div className="flex items-center justify-between border-b border-[#2d333b] p-4 sm:p-6">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500 shadow-lg shadow-amber-500/20">
-              <Printer className="h-6 w-6 text-black" />
+        <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-3 sm:px-4">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500 shadow-md shadow-amber-500/15">
+              <Printer className="h-5 w-5 text-black" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-base font-black tracking-tighter text-white sm:text-lg">print1.ai</h1>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500">Pro Processor</p>
+              <h1 className="truncate text-sm font-bold tracking-tight text-white sm:text-base">print1.ai</h1>
+              <p className="text-[9px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Pregătire fișier pentru tipar</p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -673,37 +1124,159 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
             >
               <X className="h-5 w-5" />
             </button>
-            <button onClick={logOut} className="p-2 hover:bg-white/5 rounded-lg transition-colors text-[#94a3b8] hover:text-red-400">
-              <LogOut className="w-4 h-4" />
-            </button>
+            <div className="flex flex-col items-center gap-0.5">
+              <button
+                type="button"
+                onClick={logOut}
+                className="rounded-lg p-2 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-red-400"
+                aria-label="Deconectare"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setExportMenuOpen(false);
+                  setMockupMenuOpen(false);
+                  setFormatPickerOpen(false);
+                  setSheetPickerOpen(false);
+                  setShowAiSettings(true);
+                  setMobileSidebarOpen(false);
+                }}
+                className="rounded-lg p-2 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-amber-400"
+                title="Setări AI — conexiuni API, model mockup"
+                aria-label="Setări AI"
+              >
+                <Cpu className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-8 custom-scrollbar">
-          {/* Section 1: File Settings */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold">1</span>
-              <div className="flex items-center gap-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-widest">
-                <Settings className="w-3 h-3" />
-                <span>File Settings</span>
+        <div className="custom-scrollbar flex-1 space-y-8 overflow-y-auto p-4 sm:p-5">
+          {/* Section: File Settings */}
+          <section className="space-y-3">
+            <div className="mb-2 flex items-center gap-2">
+              <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                <Settings className="h-3 w-3 shrink-0" />
+                <span className="truncate">Format & tehnic</span>
               </div>
             </div>
             
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Format</label>
-                <select 
-                  value={settings.formatId}
-                  onChange={(e) => setSettings({...settings, formatId: e.target.value})}
-                  className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-amber-500 transition-colors"
-                >
-                  {PRINT_FORMATS.map(f => (
-                    <option key={f.id} value={f.id}>{f.name} ({f.width}x{f.height}mm)</option>
-                  ))}
-                  <option value="custom">Custom Size...</option>
-                </select>
-              </div>
+            <div className="space-y-2.5">
+              <div ref={formatPickerRef} className="relative">
+                  <button
+                    type="button"
+                    aria-expanded={formatPickerOpen}
+                    aria-haspopup="listbox"
+                    onClick={() => {
+                      setSheetPickerOpen(false);
+                      setFormatPickerOpen((o) => !o);
+                    }}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-sm transition-all",
+                      formatPickerOpen
+                        ? "border-amber-500/50 bg-[#1a1d23] shadow-[0_0_0_1px_rgba(245,158,11,0.15)]"
+                        : "border-[#2d333b] bg-[#1a1d23] hover:border-white/15 hover:bg-[#1e2229]",
+                    )}
+                  >
+                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <div
+                        className={cn(
+                          "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                          formatPickerOpen ? "border-amber-500/30 bg-amber-500/10" : "border-[#2d333b] bg-[#0d1117]/80",
+                        )}
+                      >
+                        <Printer className="h-4 w-4 text-amber-500/90" aria-hidden />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium text-white">
+                          {(() => {
+                            const f = PRINT_FORMATS.find((x) => x.id === settings.formatId);
+                            if (!f) return "Format";
+                            return f.id === "custom" ? "Dimensiuni personalizate" : f.name;
+                          })()}
+                        </p>
+                        <p className="truncate text-[11px] text-[#94a3b8]">
+                          {settings.formatId === "custom"
+                            ? settings.customWidth != null && settings.customHeight != null
+                              ? `${settings.customWidth}×${settings.customHeight} mm`
+                              : "Setare manuală (mm)"
+                            : (() => {
+                                const f = PRINT_FORMATS.find((x) => x.id === settings.formatId);
+                                return f ? `${f.width}×${f.height} mm` : "";
+                              })()}
+                        </p>
+                      </div>
+                    </div>
+                    <ChevronDown
+                      className={cn("h-4 w-4 shrink-0 text-[#94a3b8] transition-transform", formatPickerOpen && "rotate-180")}
+                      aria-hidden
+                    />
+                  </button>
+                  <AnimatePresence>
+                    {formatPickerOpen && (
+                      <motion.div
+                        key="format-picker"
+                        initial={DROPDOWN_PANEL.initial}
+                        animate={DROPDOWN_PANEL.animate}
+                        exit={DROPDOWN_PANEL.exit}
+                        transition={DROPDOWN_PANEL.transition}
+                        className="absolute left-0 right-0 top-[calc(100%+6px)] z-[70] overflow-hidden rounded-xl border border-[#2d333b] bg-[#161b22] shadow-xl shadow-black/40 ring-1 ring-black/20"
+                        role="listbox"
+                        aria-label="Alege formatul paginii"
+                      >
+                      <div className="border-b border-[#2d333b]/80 bg-[#0d1117]/50 px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-[#94a3b8]">Dimensiune pagină</p>
+                        <p className="text-[10px] text-[#64748b]">Preseturi tipografice + personalizat</p>
+                      </div>
+                      <div className="custom-scrollbar max-h-[min(55vh,16rem)] overflow-y-auto p-1.5">
+                        {PRINT_FORMATS.map((f) => {
+                          const selected = settings.formatId === f.id;
+                          const isCustom = f.id === "custom";
+                          const dimLabel = isCustom
+                            ? "Lățime și înălțime la alegere"
+                            : `${f.width}×${f.height} mm`;
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              role="option"
+                              aria-selected={selected}
+                              onClick={() => {
+                                setSettings({ ...settings, formatId: f.id });
+                                setFormatPickerOpen(false);
+                              }}
+                              className={cn(
+                                "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
+                                selected
+                                  ? "bg-amber-500/15 ring-1 ring-amber-500/25"
+                                  : "hover:bg-white/[0.04]",
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  "flex min-h-8 min-w-8 max-w-[3.5rem] shrink-0 items-center justify-center rounded-md px-1 text-[8px] font-bold leading-tight tabular-nums",
+                                  selected ? "bg-amber-500 text-black" : "bg-[#21262d] text-[#94a3b8]",
+                                )}
+                              >
+                                {isCustom ? "±" : `${f.width}×${f.height}`}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[13px] font-medium text-[#e6edf3]">
+                                  {isCustom ? "Dimensiuni personalizate" : f.name}
+                                </span>
+                                <span className="block truncate text-[11px] text-[#64748b]">{dimLabel}</span>
+                              </span>
+                              {selected && <Check className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
 
               {settings.formatId === 'custom' && (
                 <div className="grid grid-cols-2 gap-2">
@@ -786,147 +1359,16 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                   </div>
                 </div>
               </div>
-
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                  AI Upscale — mod
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSettings({ ...settings, upscaleMode: "extend" })}
-                    className={cn(
-                      "py-2.5 rounded-xl text-[10px] font-bold uppercase transition-all border text-center leading-tight",
-                      (settings.upscaleMode ?? "extend") === "extend"
-                        ? "bg-amber-500 border-amber-500 text-black"
-                        : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
-                    )}
-                  >
-                    Extend + outpainting
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSettings({ ...settings, upscaleMode: "recompose" })}
-                    className={cn(
-                      "py-2.5 rounded-xl text-[10px] font-bold uppercase transition-all border text-center leading-tight",
-                      settings.upscaleMode === "recompose"
-                        ? "bg-amber-500 border-amber-500 text-black"
-                        : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
-                    )}
-                  >
-                    Recompunere
-                  </button>
-                </div>
-                <p className="text-[9px] text-[#64748b] leading-snug px-0.5">
-                  <span className="text-[#94a3b8]">Extend:</span> artwork-ul central rămâne neschimbat; benzile noi se umplu continuând elementele de design (pattern, cadre, textură), nu blocuri goale uniforme.
-                  <span className="text-[#94a3b8]"> Recompunere:</span> mută și reordonează liber elementele existente (scale per bucată) — fără stretch uniform pe tot tabloul și fără conținut nou.
-                </p>
-              </div>
             </div>
-          </div>
+          </section>
 
-          {/* Section 2: Export Options */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold">2</span>
-              <div className="flex items-center gap-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-widest">
-                <Download className="w-3 h-3" />
-                <span>Export Options</span>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              {file?.type === 'application/pdf' && (
-                <div className="space-y-2 p-3 bg-white/5 rounded-xl border border-white/5 mb-2">
-                  <div className="flex items-center gap-2 mb-2">
-                    <FileText className="w-4 h-4 text-amber-500" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-amber-500">PDF Export Range</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setSettings(s => ({ ...s, pdfPageRange: 'all' }))}
-                      className={cn(
-                        "py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all border text-center",
-                        settings.pdfPageRange === 'all' 
-                          ? "bg-amber-500 border-amber-500 text-black" 
-                          : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
-                      )}
-                    >
-                      All Pages
-                    </button>
-                    <button
-                      onClick={() => setSettings(s => ({ ...s, pdfPageRange: 'current' }))}
-                      className={cn(
-                        "py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all border text-center",
-                        settings.pdfPageRange === 'current' 
-                          ? "bg-amber-500 border-amber-500 text-black" 
-                          : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
-                      )}
-                    >
-                      Current Page
-                    </button>
-                  </div>
-                  {settings.pdfPageRange === 'current' && (
-                    <p className="text-[10px] text-center text-[#94a3b8] italic">Exporting page {currentPage} of {totalPages}</p>
-                  )}
-                </div>
-              )}
-              
-              <div className="flex flex-col gap-2 p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CropIcon className={cn("w-4 h-4", settings.addCutLine ? "text-amber-500" : "text-[#94a3b8]")} />
-                    <div>
-                      <span className="text-sm font-medium block">Production CutContour</span>
-                      <span className="text-[9px] text-[#94a3b8]">Named spot color for digital cutting</span>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setSettings({...settings, addCutLine: !settings.addCutLine})}
-                    className={cn(
-                      "w-10 h-5 rounded-full transition-colors relative",
-                      settings.addCutLine ? "bg-amber-500" : "bg-[#2d333b]"
-                    )}
-                  >
-                    <div className={cn(
-                      "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
-                      settings.addCutLine ? "right-1" : "left-1"
-                    )} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl">
-                <div className="flex items-center gap-2">
-                  <Palette className={cn("w-4 h-4", settings.simulateCMYK ? "text-amber-500" : "text-[#94a3b8]")} />
-                  <span className="text-sm font-medium">Simulate CMYK</span>
-                </div>
-                <button 
-                  onClick={() => setSettings({...settings, simulateCMYK: !settings.simulateCMYK})}
-                  className={cn(
-                    "w-10 h-5 rounded-full transition-colors relative",
-                    settings.simulateCMYK ? "bg-amber-500" : "bg-[#2d333b]"
-                  )}
-                >
-                  <div className={cn(
-                    "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
-                    settings.simulateCMYK ? "right-1" : "left-1"
-                  )} />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 3: Imposition Settings */}
+          {/* Section: Imposition Settings */}
           {PRINT_FORMATS.find(f => f.id === settings.formatId)?.isPaper && (
-            <div className="space-y-4 animate-in fade-in slide-in-from-top-4 duration-500">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold">3</span>
-                <div className="flex items-center justify-between flex-1">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-widest">
-                    <LayoutGrid className="w-3 h-3" />
-                    <span>Imposition Settings</span>
-                  </div>
+            <section className="space-y-4 border-t border-[var(--border)]/60 pt-6">
+              <div className="mb-2 flex items-center gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                  <LayoutGrid className="h-3 w-3 shrink-0" />
+                  <span className="truncate">Imposiție pe coală</span>
                 </div>
               </div>
               
@@ -951,26 +1393,168 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                 </div>
 
                 <div className="space-y-1.5 pt-2">
-                  <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                    <label>Sheet Size</label>
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
+                    Dimensiune coală
+                  </label>
+                  <div ref={sheetPickerRef} className="relative">
+                    <button
+                      type="button"
+                      aria-expanded={sheetPickerOpen}
+                      aria-haspopup="listbox"
+                      onClick={() => {
+                        setFormatPickerOpen(false);
+                        setSheetPickerOpen((o) => !o);
+                      }}
+                      className={cn(
+                        "flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-sm transition-all",
+                        sheetPickerOpen
+                          ? "border-amber-500/50 bg-[#1a1d23] shadow-[0_0_0_1px_rgba(245,158,11,0.15)]"
+                          : "border-[#2d333b] bg-[#1a1d23] hover:border-white/15 hover:bg-[#1e2229]",
+                      )}
+                    >
+                      <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                        <div
+                          className={cn(
+                            "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+                            sheetPickerOpen ? "border-amber-500/30 bg-amber-500/10" : "border-[#2d333b] bg-[#0d1117]/80",
+                          )}
+                        >
+                          <LayoutGrid className="h-4 w-4 text-amber-500/90" aria-hidden />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium text-white">
+                            {(() => {
+                              const sid = settings.impositionSheetId ?? "a4";
+                              const s = IMPOSITION_SHEETS.find((x) => x.id === sid);
+                              return s?.name ?? "Coală";
+                            })()}
+                          </p>
+                          <p className="truncate text-[11px] text-[#94a3b8]">
+                            {(() => {
+                              const sid = settings.impositionSheetId ?? "a4";
+                              const s = IMPOSITION_SHEETS.find((x) => x.id === sid);
+                              if (!s) return "";
+                              if (s.id === "custom") {
+                                const w = settings.customSheetWidth;
+                                const h = settings.customSheetHeight;
+                                if (w != null && h != null && w > 0 && h > 0) {
+                                  return `${w}×${h} mm`;
+                                }
+                                return "Dimensiuni la alegere (mm)";
+                              }
+                              return `${s.width}×${s.height} mm`;
+                            })()}
+                          </p>
+                        </div>
+                      </div>
+                      <ChevronDown
+                        className={cn("h-4 w-4 shrink-0 text-[#94a3b8] transition-transform", sheetPickerOpen && "rotate-180")}
+                        aria-hidden
+                      />
+                    </button>
+                    <AnimatePresence>
+                      {sheetPickerOpen && (
+                        <motion.div
+                          key="sheet-picker"
+                          initial={DROPDOWN_PANEL.initial}
+                          animate={DROPDOWN_PANEL.animate}
+                          exit={DROPDOWN_PANEL.exit}
+                          transition={DROPDOWN_PANEL.transition}
+                          className="absolute left-0 right-0 top-[calc(100%+6px)] z-[70] overflow-hidden rounded-xl border border-[#2d333b] bg-[#161b22] shadow-xl shadow-black/40 ring-1 ring-black/20"
+                          role="listbox"
+                          aria-label="Alege dimensiunea coalei"
+                        >
+                          <div className="border-b border-[#2d333b]/80 bg-[#0d1117]/50 px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#94a3b8]">Coală tipografică</p>
+                            <p className="text-[10px] text-[#64748b]">Preseturi standard + coală personalizată</p>
+                          </div>
+                          <div className="custom-scrollbar max-h-[min(55vh,14rem)] overflow-y-auto p-1.5">
+                            {IMPOSITION_SHEETS.map((s) => {
+                              const sid = settings.impositionSheetId ?? "a4";
+                              const selected = sid === s.id;
+                              const isCustom = s.id === "custom";
+                              const dimLabel = isCustom
+                                ? "Lățime și înălțime coală la alegere"
+                                : `${s.width}×${s.height} mm`;
+                              return (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={selected}
+                                  onClick={() => {
+                                    setSettings({
+                                      ...settings,
+                                      impositionSheetId: s.id,
+                                      customSheetWidth: s.width || 0,
+                                      customSheetHeight: s.height || 0,
+                                    });
+                                    setSheetPickerOpen(false);
+                                  }}
+                                  className={cn(
+                                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
+                                    selected
+                                      ? "bg-amber-500/15 ring-1 ring-amber-500/25"
+                                      : "hover:bg-white/[0.04]",
+                                  )}
+                                >
+                                  <span
+                                    className={cn(
+                                      "flex min-h-8 min-w-8 max-w-[4rem] shrink-0 items-center justify-center rounded-md px-1 text-[8px] font-bold leading-tight tabular-nums",
+                                      selected ? "bg-amber-500 text-black" : "bg-[#21262d] text-[#94a3b8]",
+                                    )}
+                                  >
+                                    {isCustom ? "±" : `${s.width}×${s.height}`}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-[13px] font-medium text-[#e6edf3]">{s.name}</span>
+                                    <span className="block truncate text-[11px] text-[#64748b]">{dimLabel}</span>
+                                  </span>
+                                  {selected && <Check className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
-                  <select 
-                    value={settings.impositionSheetId}
-                    onChange={(e) => {
-                      const sheet = IMPOSITION_SHEETS.find(s => s.id === e.target.value);
-                      setSettings({
-                        ...settings, 
-                        impositionSheetId: e.target.value,
-                        customSheetWidth: sheet?.width || 0,
-                        customSheetHeight: sheet?.height || 0
-                      });
-                    }}
-                    className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500"
-                  >
-                    {IMPOSITION_SHEETS.map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
+                  {(settings.impositionSheetId ?? "a4") === "custom" && (
+                    <div className="grid grid-cols-2 gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
+                          Lățime coală (mm)
+                        </label>
+                        <input
+                          type="number"
+                          value={settings.customSheetWidth === null || settings.customSheetWidth === undefined ? "" : settings.customSheetWidth}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              customSheetWidth: e.target.value === "" ? null : Number(e.target.value),
+                            })
+                          }
+                          className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
+                          Înălțime coală (mm)
+                        </label>
+                        <input
+                          type="number"
+                          value={settings.customSheetHeight === null || settings.customSheetHeight === undefined ? "" : settings.customSheetHeight}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              customSheetHeight: e.target.value === "" ? null : Number(e.target.value),
+                            })
+                          }
+                          className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl">
@@ -1048,469 +1632,536 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                   </button>
                 </div>
               </div>
-            </div>
+            </section>
           )}
 
-          {/* Section 4: Client Approval */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold">4</span>
-              <div className="flex items-center gap-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-widest">
-                <CheckCircle2 className="w-3 h-3" />
-                <span>Status Comandă</span>
-              </div>
-            </div>
-            
-            <div className="space-y-2">
-              <button 
-                onClick={() => setIsApproved(!isApproved)}
-                className={cn(
-                  "w-full py-4 rounded-2xl text-sm font-black uppercase tracking-tighter transition-all flex items-center justify-center gap-3 border-2 shadow-xl",
-                  isApproved 
-                    ? "bg-green-500 border-green-400 text-black shadow-green-500/20" 
-                    : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-amber-500/50"
-                )}
-              >
-                {isApproved ? (
-                  <>
-                    <CheckCircle2 className="w-5 h-5" />
-                    Aprobat de client
-                  </>
-                ) : (
-                  <>
-                    <AlertCircle className="w-5 h-5" />
-                    Așteaptă aprobare
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Section 5: Quick Mockups */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/20 text-amber-500 text-[10px] font-bold">5</span>
-              <div className="flex items-center gap-2 text-xs font-semibold text-[#94a3b8] uppercase tracking-widest">
-                <Sparkles className="w-3 h-3" />
-                <span>Quick Mockups</span>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {MOCKUP_TYPES.map(m => (
-                <button 
-                  key={m.id}
-                  onClick={() => { setMockupType(m.id as MockupType); setShowMockup(true); }}
-                  className="flex items-center gap-3 p-2.5 bg-[#1a1d23] border border-[#2d333b] rounded-xl hover:border-amber-500/50 hover:bg-amber-500/5 transition-all group"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-[#2d333b] flex items-center justify-center group-hover:bg-amber-500/20 transition-colors shrink-0">
-                    <m.icon className="w-4 h-4 text-[#94a3b8] group-hover:text-amber-500" />
-                  </div>
-                  <span className="text-[10px] font-bold uppercase tracking-tight text-[#94a3b8] group-hover:text-white transition-colors">{m.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="p-4 border-t border-[#2d333b] bg-[#0d1117]/50">
-          <button 
-            onClick={() => {
-              setMobileSidebarOpen(false);
-              handleDownload();
-            }}
-            disabled={!file || isProcessing}
-            className="w-full py-4 bg-amber-500 text-black rounded-2xl text-sm font-black uppercase tracking-widest hover:bg-amber-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-amber-500/20 flex items-center justify-center gap-3"
-          >
-            {isProcessing ? (
-              <RefreshCw className="w-5 h-5 animate-spin" />
-            ) : (
-              <Download className="w-5 h-5" />
-            )}
-            Generate Print File
-          </button>
         </div>
       </aside>
 
       {/* Main Content */}
-      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Header */}
-        <header className="z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[#2d333b] bg-[#16191e]/50 px-3 backdrop-blur-md sm:h-16 sm:px-4 lg:px-8">
+      <main className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-10 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--surface-elevated)]/85 px-2.5 backdrop-blur-md sm:h-14 sm:px-3 lg:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs font-medium sm:gap-2 sm:text-sm">
             <button
               type="button"
-              className="flex shrink-0 items-center justify-center rounded-lg p-2 text-[#94a3b8] hover:bg-white/5 hover:text-white lg:hidden"
+              className="flex shrink-0 items-center justify-center rounded-lg p-2 text-[var(--text-muted)] hover:bg-white/5 hover:text-white lg:hidden"
               aria-label="Deschide setările print"
               onClick={() => setMobileSidebarOpen(true)}
             >
               <PanelLeft className="h-5 w-5" />
             </button>
-            <span className="hidden shrink-0 text-[#94a3b8] sm:inline">Workspace</span>
-            <ChevronRight className="hidden h-4 w-4 shrink-0 text-[#2d333b] sm:block" />
+            <span className="hidden shrink-0 text-[var(--text-muted)] sm:inline">Fișier</span>
+            <ChevronRight className="hidden h-3.5 w-3.5 shrink-0 text-[var(--border)] sm:block" />
             <span className="min-w-0 truncate text-white" title={file ? file.name : undefined}>
-              {file ? file.name : "Niciun fișier"}
+              {file ? file.name : "Încarcă un PDF sau imagine"}
             </span>
           </div>
-          
-          <div className="flex shrink-0 items-center gap-1.5 sm:gap-3 lg:gap-4">
+
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
+            <div ref={exportMenuRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setMockupMenuOpen(false);
+                  setFormatPickerOpen(false);
+                  setSheetPickerOpen(false);
+                  setExportMenuOpen((o) => !o);
+                }}
+                aria-expanded={exportMenuOpen}
+                aria-haspopup="menu"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
+                  exportMenuOpen
+                    ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
+                    : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text-muted)] hover:border-white/20 hover:text-white",
+                )}
+              >
+                <Download className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline">Export</span>
+                <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", exportMenuOpen && "rotate-180")} />
+              </button>
+              <AnimatePresence>
+                {exportMenuOpen && (
+                  <motion.div
+                    key="export-menu"
+                    initial={DROPDOWN_PANEL.initial}
+                    animate={DROPDOWN_PANEL.animate}
+                    exit={DROPDOWN_PANEL.exit}
+                    transition={DROPDOWN_PANEL.transition}
+                    className="absolute right-0 top-full z-[60] mt-1 w-[min(calc(100vw-2rem),22rem)] rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] p-3 shadow-xl"
+                    role="menu"
+                  >
+                  <div className="mb-3 border-b border-[var(--border)] pb-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">Export fișiere</p>
+                    <p className="mt-0.5 text-[10px] leading-snug text-[var(--text-muted)]/90">
+                      PDF pentru tipar, coală imposată sau imagine din previzualizarea curentă
+                    </p>
+                  </div>
+                  <div className="max-h-[min(70vh,28rem)] space-y-3 overflow-y-auto custom-scrollbar">
+                    <div className="space-y-1.5">
+                      <p className="px-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Tip fișier</p>
+                      <div className="space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={!file || isProcessing}
+                          title={!file ? "Încarcă un fișier" : undefined}
+                          onClick={() => {
+                            setExportMenuOpen(false);
+                            setMobileSidebarOpen(false);
+                            void handleDownload();
+                          }}
+                          className={cn(
+                            "flex w-full items-center gap-3 rounded-xl border p-2.5 text-left transition-colors",
+                            !file || isProcessing
+                              ? "cursor-not-allowed border-[var(--border)]/60 opacity-50"
+                              : "border-[var(--border)] bg-[var(--card)]/80 hover:border-amber-500/45 hover:bg-amber-500/5",
+                          )}
+                        >
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-amber-500/25 bg-amber-500/10">
+                            {isProcessing ? (
+                              <RefreshCw className="h-4 w-4 animate-spin text-amber-500" aria-hidden />
+                            ) : (
+                              <Printer className="h-4 w-4 text-amber-500" aria-hidden />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="block text-xs font-semibold text-[var(--text)]">PDF tipăribil</span>
+                            <span className="mt-0.5 block text-[10px] leading-snug text-[var(--text-muted)]">
+                              Format setat, bleed, safe, ghidaje · .pdf
+                            </span>
+                          </div>
+                          <Download className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            !file ||
+                            isProcessing ||
+                            !PRINT_FORMATS.find((f) => f.id === settings.formatId)?.isPaper
+                          }
+                          title={
+                            !PRINT_FORMATS.find((f) => f.id === settings.formatId)?.isPaper
+                              ? "Disponibil pentru formate pe coală (ex. A4, carte de vizită)"
+                              : undefined
+                          }
+                          onClick={() => {
+                            setExportMenuOpen(false);
+                            setMobileSidebarOpen(false);
+                            void handleImposition();
+                          }}
+                          className={cn(
+                            "flex w-full items-center gap-3 rounded-xl border p-2.5 text-left transition-colors",
+                            !file || isProcessing || !PRINT_FORMATS.find((f) => f.id === settings.formatId)?.isPaper
+                              ? "cursor-not-allowed border-[var(--border)]/60 opacity-50"
+                              : "border-[var(--border)] bg-[var(--card)]/80 hover:border-amber-500/45 hover:bg-amber-500/5",
+                          )}
+                        >
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5">
+                            {isProcessing ? (
+                              <RefreshCw className="h-4 w-4 animate-spin text-[var(--text-muted)]" aria-hidden />
+                            ) : (
+                              <LayoutGrid className="h-4 w-4 text-[var(--text-muted)]" aria-hidden />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="block text-xs font-semibold text-[var(--text)]">PDF imposiție</span>
+                            <span className="mt-0.5 block text-[10px] leading-snug text-[var(--text-muted)]">
+                              Mai multe exemplare pe coală (setări secțiunea Imposiție) · .pdf
+                            </span>
+                          </div>
+                          <Layers className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!processedUrl}
+                          title={!processedUrl ? "Generează mai întâi previzualizarea" : undefined}
+                          onClick={() => {
+                            setExportMenuOpen(false);
+                            void handleExportPreviewImage();
+                          }}
+                          className={cn(
+                            "flex w-full items-center gap-3 rounded-xl border p-2.5 text-left transition-colors",
+                            !processedUrl
+                              ? "cursor-not-allowed border-[var(--border)]/60 opacity-50"
+                              : "border-[var(--border)] bg-[var(--card)]/80 hover:border-emerald-500/35 hover:bg-emerald-500/5",
+                          )}
+                        >
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10">
+                            <ImageIcon className="h-4 w-4 text-emerald-400" aria-hidden />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="block text-xs font-semibold text-[var(--text)]">Imagine previzualizare</span>
+                            <span className="mt-0.5 block text-[10px] leading-snug text-[var(--text-muted)]">
+                              PNG / JPG / WebP din preview-ul curent
+                            </span>
+                          </div>
+                          <Download className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-[var(--border)] pt-2">
+                      <p className="mb-2 px-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                        Opțiuni PDF tipăribil
+                      </p>
+                      <div className="space-y-2">
+                        {file?.type === "application/pdf" && (
+                          <div className="space-y-2 rounded-lg border border-white/10 bg-white/5 p-2.5">
+                            <div className="flex items-center gap-2">
+                              <FileText className="h-4 w-4 text-amber-500" />
+                              <span className="text-[11px] font-bold uppercase tracking-wide text-amber-500">Pagini PDF</span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSettings((s) => ({ ...s, pdfPageRange: "all" }))}
+                                className={cn(
+                                  "rounded-lg border py-1.5 text-[10px] font-bold uppercase transition-all",
+                                  settings.pdfPageRange === "all"
+                                    ? "border-amber-500 bg-amber-500 text-black"
+                                    : "border-[var(--border)] bg-[var(--card)] text-[var(--text-muted)] hover:border-white/20",
+                                )}
+                              >
+                                Toate
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSettings((s) => ({ ...s, pdfPageRange: "current" }))}
+                                className={cn(
+                                  "rounded-lg border py-1.5 text-[10px] font-bold uppercase transition-all",
+                                  settings.pdfPageRange === "current"
+                                    ? "border-amber-500 bg-amber-500 text-black"
+                                    : "border-[var(--border)] bg-[var(--card)] text-[var(--text-muted)] hover:border-white/20",
+                                )}
+                              >
+                                Pagina curentă
+                              </button>
+                            </div>
+                            {settings.pdfPageRange === "current" && (
+                              <p className="text-center text-[10px] italic text-[var(--text-muted)]">
+                                Pagina {currentPage} / {totalPages}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <CropIcon className={cn("h-4 w-4 shrink-0", settings.addCutLine ? "text-amber-500" : "text-[var(--text-muted)]")} />
+                                <span className="text-xs font-medium text-[var(--text)]">CutContour</span>
+                              </div>
+                              <span className="mt-0.5 block text-[9px] text-[var(--text-muted)]">Spot pentru tăiere digitală</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSettings({ ...settings, addCutLine: !settings.addCutLine })}
+                              className={cn(
+                                "relative h-5 w-10 shrink-0 rounded-full transition-colors",
+                                settings.addCutLine ? "bg-amber-500" : "bg-[#2d333b]",
+                              )}
+                              aria-pressed={settings.addCutLine}
+                            >
+                              <span
+                                className={cn(
+                                  "absolute top-1 h-3 w-3 rounded-full bg-white transition-all",
+                                  settings.addCutLine ? "right-1" : "left-1",
+                                )}
+                              />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--card)] p-2.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <Palette className={cn("h-4 w-4 shrink-0", settings.simulateCMYK ? "text-amber-500" : "text-[var(--text-muted)]")} />
+                                <span className="text-xs font-medium text-[var(--text)]">Contrast / culoare pe ecran</span>
+                              </div>
+                              <p className="mt-1 text-[9px] leading-snug text-[var(--text-muted)]">
+                                Aplică pe previzualizarea din centru un filtru aproximativ (saturation, contrast, luminanță) — doar pentru ochii tăi pe monitor, nu schimbă fișierul exportat și nu înlocuiește probă tipar sau profil ICC. Analiza obiectivă (DPI, margini, gamut) o ai în panoul din dreapta, tabul{" "}
+                                <span className="font-semibold text-[var(--text)]">Calitate</span>, după ce rulezi verificarea.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSettings({ ...settings, simulateCMYK: !settings.simulateCMYK })}
+                              className={cn(
+                                "relative mt-0.5 h-5 w-10 shrink-0 rounded-full transition-colors",
+                                settings.simulateCMYK ? "bg-amber-500" : "bg-[#2d333b]",
+                              )}
+                              aria-pressed={settings.simulateCMYK}
+                              aria-label="Activează sau dezactivează aproximarea de contrast și culoare pe ecran"
+                            >
+                              <span
+                                className={cn(
+                                  "absolute top-1 h-3 w-3 rounded-full bg-white transition-all",
+                                  settings.simulateCMYK ? "right-1" : "left-1",
+                                )}
+                              />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+            <div ref={mockupMenuRef} className="relative shrink-0">
+              <button
+                type="button"
+                disabled={!processedUrl}
+                title={!processedUrl ? "Ai nevoie de o previzualizare procesată" : undefined}
+                onClick={() => {
+                  if (!processedUrl) return;
+                  setExportMenuOpen(false);
+                  setFormatPickerOpen(false);
+                  setSheetPickerOpen(false);
+                  setMockupMenuOpen((o) => !o);
+                }}
+                aria-expanded={mockupMenuOpen}
+                aria-haspopup="menu"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
+                  !processedUrl && "cursor-not-allowed opacity-40",
+                  mockupMenuOpen && processedUrl
+                    ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
+                    : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text-muted)] hover:border-white/20 hover:text-white",
+                )}
+              >
+                <Sparkles className="h-4 w-4 shrink-0 text-amber-500/90" />
+                <span className="hidden sm:inline">Mockup</span>
+                <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", mockupMenuOpen && "rotate-180")} />
+              </button>
+              <AnimatePresence>
+                {mockupMenuOpen && processedUrl && (
+                  <motion.div
+                    key="mockup-menu"
+                    initial={DROPDOWN_PANEL.initial}
+                    animate={DROPDOWN_PANEL.animate}
+                    exit={DROPDOWN_PANEL.exit}
+                    transition={DROPDOWN_PANEL.transition}
+                    className="absolute right-0 top-full z-[60] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] p-2 shadow-xl"
+                    role="menu"
+                  >
+                  <p className="mb-2 border-b border-[var(--border)] px-1 pb-2 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+                    Tip mockup
+                  </p>
+                  <div className="custom-scrollbar max-h-[min(70vh,22rem)] space-y-0.5 overflow-y-auto pr-0.5">
+                    {MOCKUP_TYPES.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMockupType(m.id as MockupType);
+                          setShowMockup(true);
+                          setMockupMenuOpen(false);
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-xs transition-colors",
+                          mockupType === m.id
+                            ? "bg-amber-500/15 text-amber-400"
+                            : "text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]",
+                        )}
+                      >
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--card)]">
+                          <m.icon className="h-4 w-4" />
+                        </span>
+                        <span className="font-medium">{m.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
             {user && (
-              <div className="flex items-center gap-1 sm:gap-3">
-                <button 
+                <button
+                  type="button"
                   onClick={() => setShowHistory(!showHistory)}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] font-medium transition-colors sm:gap-2 sm:px-3 sm:text-xs",
-                    showHistory ? "bg-amber-500 text-black" : "bg-[#2d333b] text-[#94a3b8] hover:text-white"
+                    "flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition-colors",
+                    showHistory
+                      ? "border-amber-500/50 bg-amber-500/15 text-amber-400"
+                      : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text-muted)] hover:border-white/20 hover:text-white"
                   )}
                 >
-                  <History className="h-3 w-3 shrink-0" />
-                  <span className="hidden sm:inline">History</span>
+                  <History className="h-4 w-4 shrink-0" />
+                  <span className="hidden sm:inline">Istoric</span>
                 </button>
-                <div className="hidden h-8 w-px bg-[#2d333b] sm:block" />
-                <button 
-                  onClick={handleSelectKey}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-all sm:gap-2 sm:px-4 sm:py-2",
-                    hasKey 
-                      ? "border-green-500/20 bg-green-500/10 text-green-500" 
-                      : "animate-pulse border-red-500/20 bg-red-500/10 text-red-500"
-                  )}
-                >
-                  <Key className="h-4 w-4 shrink-0" />
-                  <span className="hidden sm:inline">{hasKey ? "API Key Active" : "Select API Key"}</span>
-                </button>
-              </div>
             )}
-
-            <button 
-              onClick={startListening}
-              className={cn(
-                "flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-all sm:gap-2 sm:px-4 sm:py-2",
-                isListening 
-                  ? "animate-pulse border-red-500/20 bg-red-500/10 text-red-500" 
-                  : "border-amber-500/20 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
-              )}
-            >
-              <Mic className="h-4 w-4 shrink-0" />
-              <span className="hidden sm:inline">Voice Assistant</span>
-            </button>
           </div>
         </header>
 
         {/* Editor Area */}
-        <div className="flex min-h-0 flex-1 flex-col gap-0 overflow-y-auto p-4 custom-scrollbar sm:p-6 lg:flex-row lg:gap-6 lg:p-8">
-          {showHistory && user && (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-[45] flex flex-col gap-4 border-0 bg-[#0d1117]/98 p-6 backdrop-blur-sm lg:relative lg:inset-auto lg:z-auto lg:w-[300px] lg:max-w-[300px] lg:shrink-0 lg:border-r lg:border-[#2d333b] lg:bg-transparent lg:p-0 lg:pr-8"
-            >
-              <div className="flex items-center justify-between gap-3 border-b border-[#2d333b] pb-4 lg:border-0 lg:pb-0">
-                <h3 className="text-sm font-bold uppercase tracking-widest text-[#94a3b8]">Recent History</h3>
-                <button
-                  type="button"
-                  onClick={() => setShowHistory(false)}
-                  className="rounded-lg p-2 text-[#94a3b8] hover:bg-white/5 hover:text-white"
-                  aria-label="Închide istoricul"
-                >
-                  <X className="h-5 w-5 lg:h-4 lg:w-4" />
-                </button>
-              </div>
-              <div className="space-y-3">
-                {history.map(item => (
-                  <div key={item.id} className="p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl space-y-1 group">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-xs font-bold truncate flex-1">{item.fileName}</p>
-                      {item.isApproved && (
-                        <CheckCircle2 className="w-3 h-3 text-green-500 shrink-0" />
-                      )}
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-[#94a3b8]">
-                      <span>{item.format}</span>
-                      <span>{item.timestamp?.toDate ? new Date(item.timestamp.toDate()).toLocaleDateString() : 'Recent'}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </motion.div>
-          )}
+        <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-0 overflow-hidden p-3 sm:p-4 lg:flex-row lg:gap-4 lg:p-5">
+          <AnimatePresence>
+            {showHistory && user && (
+              <FileHistoryDrawer
+                groupedHistory={groupedHistory}
+                legacyHistory={history}
+                onClose={() => setShowHistory(false)}
+                onSelectAsset={loadHistoryAsset}
+                loadingAssetId={historyLoadingAssetId}
+                selectedAssetId={historySelectedAssetId}
+              />
+            )}
+          </AnimatePresence>
 
-          <div className="mx-auto flex min-h-0 w-full max-w-[88rem] flex-1 flex-col-reverse gap-6 lg:flex-col lg:gap-8">
-            {/* Top Row: Dropzone & Analysis */}
-            <div className="grid h-auto min-h-[200px] grid-cols-1 gap-4 sm:min-h-[280px] sm:gap-6 lg:h-[400px] lg:min-h-[400px] lg:grid-cols-2 lg:gap-8">
-              <div 
-                {...getRootProps()} 
-                className={cn(
-                  "relative border-2 border-dashed rounded-3xl flex flex-col items-center justify-center gap-4 transition-all cursor-pointer group overflow-hidden",
-                  isDragActive 
-                    ? "border-amber-500 bg-amber-500/5" 
-                    : file 
-                      ? "border-[#2d333b] bg-[#16191e]" 
-                      : "border-[#2d333b] hover:border-amber-500/50 hover:bg-amber-500/5"
-                )}
-              >
-                <input {...getInputProps()} />
-                {previewUrl ? (
-                  <>
-                    <img 
-                      src={previewUrl} 
-                      alt="Preview" 
-                      className={cn(
-                        "absolute inset-0 w-full h-full object-cover opacity-20 blur-sm",
-                        settings.simulateCMYK && "simulate-cmyk"
-                      )} 
-                    />
-                    <div className="relative z-10 flex flex-col items-center gap-4">
-                      <div className="w-20 h-20 rounded-2xl bg-amber-500 flex items-center justify-center shadow-xl shadow-amber-500/20">
-                        <FileText className="w-10 h-10 text-black" />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-sm font-bold">{file?.name}</p>
-                        <p className="text-xs text-[#94a3b8]">{(file?.size || 0) / 1024 / 1024 < 1 ? `${((file?.size || 0) / 1024).toFixed(1)} KB` : `${((file?.size || 0) / 1024 / 1024).toFixed(1)} MB`}</p>
-                      </div>
-                      <button className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-bold uppercase transition-colors">Change File</button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="w-20 h-20 rounded-2xl bg-[#1a1d23] flex items-center justify-center group-hover:scale-110 transition-transform">
-                      <Upload className="w-10 h-10 text-[#2d333b] group-hover:text-amber-500" />
+          <div className="mx-auto flex min-h-0 w-full max-w-[100rem] flex-1 flex-col gap-4 overflow-hidden px-2 pb-2 sm:px-3 lg:flex-row lg:items-stretch lg:gap-3 lg:px-4">
+            <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col justify-center overflow-hidden lg:min-h-0">
+              <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-hidden px-0 py-0 sm:py-1 lg:mx-0 lg:max-w-none">
+                {!file ? (
+                  <div
+                    {...getRootProps()}
+                    className={cn(
+                      "flex min-h-0 flex-1 cursor-pointer flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed px-4 py-10 transition-all",
+                      isDragActive
+                        ? "border-amber-500 bg-amber-500/5"
+                        : "border-[var(--border)] hover:border-amber-500/40 hover:bg-amber-500/[0.03]",
+                    )}
+                  >
+                    <input {...getInputProps()} />
+                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--card)]">
+                      <Upload className="h-7 w-7 text-[var(--text-muted)]" />
                     </div>
                     <div className="text-center">
-                      <p className="text-lg font-bold">Drop your print file here</p>
-                      <p className="text-sm text-[#94a3b8]">PDF, PNG, JPG or WebP (Max 50MB)</p>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <div className="bg-[#16191e] border border-[#2d333b] rounded-3xl p-4 sm:p-6 flex flex-col gap-4 sm:gap-6">
-                <div className="flex flex-col items-center justify-between gap-4 sm:flex-row sm:items-center">
-                  <div className="flex items-center gap-3 text-center sm:text-left">
-                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
-                      <Zap className="w-5 h-5 text-amber-500" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold uppercase tracking-widest">AI Print Analysis</h3>
-                      <p className="text-[10px] text-[#94a3b8]">Quality & Compliance Check</p>
+                      <p className="text-base font-semibold text-white">Trage fișierul aici</p>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">PDF, PNG, JPG, WebP sau SVG</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => handleAIAnalysis()}
-                    disabled={!file || isAnalyzing}
-                    className="w-full shrink-0 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-bold uppercase text-black transition-colors hover:bg-amber-600 disabled:opacity-50 sm:w-auto"
-                  >
-                    {isAnalyzing ? "Analyzing..." : "Run Check"}
-                  </button>
-                </div>
-
-                <div className="flex-1 bg-[#0d1117] rounded-2xl border border-[#2d333b] p-4 overflow-y-auto custom-scrollbar">
-                  {analysis ? (
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-[#94a3b8]">Estimated Quality</span>
-                        <span className={cn(
-                          "px-2 py-1 rounded text-[10px] font-bold uppercase",
-                          analysis.currentEstimatedQuality === 'high' ? "bg-green-500/20 text-green-500" :
-                          analysis.currentEstimatedQuality === 'medium' ? "bg-amber-500/20 text-amber-500" : "bg-red-500/20 text-red-500"
-                        )}>
-                          {analysis.currentEstimatedQuality}
-                        </span>
+                ) : (
+                  <>
+                    <div className="mb-2 flex shrink-0 flex-col gap-2 pb-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/15">
+                          <Eye className="h-4 w-4 text-amber-500" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--text)]">Previzualizare tipăribil</h3>
+                          <p className="text-[10px] text-[var(--text-muted)]">Bleed, safe, ghidaje</p>
+                          <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]" title={file?.name}>{file?.name}</p>
+                        </div>
                       </div>
-                      
-                      <div className="space-y-2">
-                        <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Issues Detected</p>
-                        {analysis.issues.length > 0 ? (
-                          analysis.issues.map((issue: string, i: number) => (
-                            <div key={i} className="flex items-center gap-2 text-xs text-red-400">
-                              <AlertCircle className="w-3 h-3" />
-                              {issue}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="flex items-center gap-2 text-xs text-green-500">
-                            <CheckCircle2 className="w-3 h-3" />
-                            No critical issues found
-                          </div>
+                      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                        {!rightToolsOpen && (
+                          <button
+                            type="button"
+                            onClick={() => setRightToolsOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/60 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)] hover:border-amber-500/35 hover:text-amber-400 lg:hidden"
+                            title="Arată panoul Agent AI și calitate"
+                          >
+                            <Bot className="h-3.5 w-3.5" />
+                            Panou AI
+                          </button>
                         )}
-                      </div>
-
-                      <div className="space-y-2">
-                        <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Recommendations</p>
-                        {analysis.recommendations.map((rec: string, i: number) => (
-                          <div key={i} className="flex items-start gap-2 text-xs text-[#94a3b8]">
-                            <ChevronRight className="w-3 h-3 mt-0.5 shrink-0" />
-                            {rec}
-                          </div>
-                        ))}
-                      </div>
-
-                      {analysis.canUpscaleHelp && (
-                        <button 
-                          onClick={handleUpscale}
-                          className="w-full py-2 bg-amber-500/10 border border-amber-500/20 text-amber-500 rounded-lg text-[10px] font-bold uppercase hover:bg-amber-500/20 transition-colors"
+                        <button
+                          type="button"
+                          onClick={() => setSettings((prev) => ({ ...prev, showGuides: !prev.showGuides }))}
+                          className={cn(
+                            "rounded-lg border px-3 py-1.5 text-xs font-bold transition-all",
+                            settings.showGuides
+                              ? "border-amber-500 bg-amber-500 text-black"
+                              : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text-muted)]",
+                          )}
                         >
-                          Upscale to fix resolution
+                          Guides
                         </button>
-                      )}
+                        <button
+                          type="button"
+                          onClick={handleDownload}
+                          className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-white/5 px-3 py-1.5 text-xs font-bold hover:bg-white/10"
+                        >
+                          <Download className="h-4 w-4" />
+                          PDF
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => open()}
+                          className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-xs font-semibold text-[var(--text)] hover:border-amber-500/40"
+                        >
+                          Schimbă fișierul
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearWorkspaceFile}
+                          className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 hover:bg-red-500/20"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          Șterge
+                        </button>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center gap-3 opacity-30">
-                      <Search className="w-8 h-8" />
-                      <p className="text-xs">Upload a file and run check to see analysis</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Bottom Row: Preview & Tools */}
-            <div className="grid min-h-[min(55vh,480px)] flex-1 grid-cols-1 gap-6 sm:gap-8 lg:min-h-[500px] lg:grid-cols-3">
-              <div className="flex flex-col gap-4 rounded-3xl border border-[#2d333b] bg-[#16191e] p-4 sm:gap-6 sm:p-6 lg:col-span-2">
-                <div className="flex flex-col items-center justify-between gap-4 sm:flex-row sm:items-center">
-                  <div className="flex items-center gap-3 text-center sm:text-left">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/20">
-                      <Eye className="h-5 w-5 text-amber-500" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold uppercase tracking-widest">Print-Ready Preview</h3>
-                      <p className="text-[10px] text-[#94a3b8]">Visualization with Bleed & Safe Zones</p>
-                    </div>
-                  </div>
-                  <div className="flex w-full flex-wrap items-center justify-center gap-2 sm:w-auto sm:justify-end">
-                    <button 
-                      onClick={() => setSettings(prev => ({ ...prev, showGuides: !prev.showGuides }))}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-xs font-bold transition-all border",
-                        settings.showGuides ? "bg-amber-500 text-black" : "bg-white/5 border-white/10 text-[#94a3b8]"
-                      )}
+                    <div
+                      {...getRootProps({
+                        className: cn(
+                          "relative flex min-h-0 flex-1 flex-col rounded-lg",
+                          isDragActive && "ring-2 ring-amber-500/50 ring-offset-2 ring-offset-[var(--bg)]",
+                        ),
+                      })}
                     >
-                      Guides
-                    </button>
-                    <button 
-                      onClick={handleDownload}
-                      className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-bold flex items-center gap-2"
-                    >
-                      <Download className="w-4 h-4" />
-                      PDF
-                    </button>
-                  </div>
-                </div>
-
-                <div className="relative flex flex-1 items-center justify-center overflow-y-auto overflow-hidden rounded-2xl border border-[#2d333b] bg-[#0d1117] p-3 sm:p-8">
+                      <input {...getInputProps()} />
+                <div className="relative flex min-h-0 flex-1 flex-col overflow-auto rounded-lg border border-[var(--border)] bg-[#0d1117] p-3 sm:p-6">
                   {processedUrl ? (
-                    <div 
-                      className="relative group shadow-[0_20px_50px_rgba(0,0,0,0.5)] bg-white transition-all duration-500"
-                      style={{ 
-                        aspectRatio: (() => {
-                          const f = PRINT_FORMATS.find(fmt => fmt.id === settings.formatId);
-                          const w = settings.formatId === 'custom' ? (settings.customWidth || 1) : (f?.width || 1);
-                          const h = settings.formatId === 'custom' ? (settings.customHeight || 1) : (f?.height || 1);
-                          return `${w} / ${h}`;
-                        })(),
-                        maxHeight: '100%',
-                        maxWidth: '100%',
-                        width: 'auto',
-                        height: 'auto'
-                      }}
-                    >
-                      {totalPages > 1 && (
-                        <div className="absolute left-2 top-2 z-50 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#1a1d23]/80 px-2 py-1 backdrop-blur-md sm:left-4 sm:top-4 sm:gap-2 sm:px-3 sm:py-1.5">
-                          <button 
-                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                            disabled={currentPage === 1}
-                            className="p-1 hover:bg-white/10 rounded-lg disabled:opacity-30 transition-colors"
-                          >
-                            <ChevronLeft className="w-4 h-4" />
-                          </button>
-                          <span className="text-[10px] font-bold text-[#94a3b8] min-w-[3rem] text-center">
-                            Page {currentPage} / {totalPages}
-                          </span>
-                          <button 
-                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                            disabled={currentPage === totalPages}
-                            className="p-1 hover:bg-white/10 rounded-lg disabled:opacity-30 transition-colors"
-                          >
-                            <ChevronRight className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
- 
-                      <img 
-                        ref={imgRef}
-                        src={processedUrl} 
-                        alt="Processed" 
-                        className={cn(
-                          "w-full h-full object-cover transition-all duration-300",
-                          settings.simulateCMYK && "simulate-cmyk"
-                        )}
-                      />
-                      
-                      {/* Floating: mod upscale + acțiuni AI */}
-                      <div className="absolute bottom-2 left-1/2 z-50 flex max-w-[calc(100%-0.5rem)] -translate-x-1/2 flex-col items-center gap-1.5 transition-all duration-300 group-hover:bottom-4 sm:bottom-4 sm:gap-2 sm:group-hover:bottom-6">
+                    <div className="flex min-h-0 w-full max-w-full flex-1 flex-col gap-3">
+                      <div className="relative flex min-h-0 flex-1 items-center justify-center">
                         <div
-                          className="flex flex-wrap items-center justify-center gap-1 rounded-xl border border-white/10 bg-[#0d1117]/95 px-1.5 py-1 shadow-lg backdrop-blur-md sm:gap-1.5 sm:px-2 sm:py-1.5"
-                          title="Modul se aplică la „AI Upscale” (nu la Imposition / AI Bleed)"
+                          className="relative group shadow-[0_20px_50px_rgba(0,0,0,0.5)] bg-white transition-all duration-500"
+                          style={{
+                            aspectRatio: (() => {
+                              const f = PRINT_FORMATS.find((fmt) => fmt.id === settings.formatId);
+                              const w =
+                                settings.formatId === "custom"
+                                  ? settings.customWidth || 1
+                                  : f?.width || 1;
+                              const h =
+                                settings.formatId === "custom"
+                                  ? settings.customHeight || 1
+                                  : f?.height || 1;
+                              return `${w} / ${h}`;
+                            })(),
+                            maxHeight: "100%",
+                            maxWidth: "100%",
+                            width: "auto",
+                            height: "auto",
+                          }}
                         >
-                          <span className="text-[8px] font-bold uppercase tracking-wider text-[#64748b] shrink-0">
-                            Upscale
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setSettings((s) => ({ ...s, upscaleMode: "extend" }))}
-                            className={cn(
-                              "rounded-lg px-2 py-1 text-[9px] font-bold uppercase transition-colors",
-                              (settings.upscaleMode ?? "extend") === "extend"
-                                ? "bg-emerald-500/25 text-emerald-400 ring-1 ring-emerald-500/40"
-                                : "text-[#94a3b8] hover:bg-white/5"
-                            )}
-                          >
-                            Extend
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setSettings((s) => ({ ...s, upscaleMode: "recompose" }))}
-                            className={cn(
-                              "rounded-lg px-2 py-1 text-[9px] font-bold uppercase transition-colors",
-                              settings.upscaleMode === "recompose"
-                                ? "bg-emerald-500/25 text-emerald-400 ring-1 ring-emerald-500/40"
-                                : "text-[#94a3b8] hover:bg-white/5"
-                            )}
-                          >
-                            Recomp.
-                          </button>
-                        </div>
+                          {totalPages > 1 && (
+                            <div className="absolute left-2 top-2 z-50 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#1a1d23]/80 px-2 py-1 backdrop-blur-md sm:left-4 sm:top-4 sm:gap-2 sm:px-3 sm:py-1.5">
+                              <button
+                                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                                disabled={currentPage === 1}
+                                className="rounded-lg p-1 transition-colors hover:bg-white/10 disabled:opacity-30"
+                              >
+                                <ChevronLeft className="h-4 w-4" />
+                              </button>
+                              <span className="min-w-[3rem] text-center text-[10px] font-bold text-[#94a3b8]">
+                                Page {currentPage} / {totalPages}
+                              </span>
+                              <button
+                                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                                disabled={currentPage === totalPages}
+                                className="rounded-lg p-1 transition-colors hover:bg-white/10 disabled:opacity-30"
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </button>
+                            </div>
+                          )}
 
-                        <div className="flex max-w-full flex-wrap items-center justify-center gap-0.5 rounded-2xl border border-white/10 bg-[#1a1d23]/90 p-0.5 shadow-[0_8px_32px_rgba(0,0,0,0.8)] backdrop-blur-xl sm:gap-1 sm:p-1 sm:group-hover:scale-105">
-                        <button 
-                          onClick={handleImposition}
-                          disabled={isProcessing}
-                          className="flex min-w-0 flex-col items-center gap-0.5 rounded-xl px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-[#94a3b8] transition-colors hover:bg-amber-500/10 hover:text-amber-500 disabled:opacity-50 sm:px-4 sm:py-2 sm:text-[9px]"
-                        >
-                          {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <LayoutGrid className="w-4 h-4" />}
-                          <span>Imposition</span>
-                        </button>
-                        <div className="mx-0.5 h-6 w-px bg-white/5 sm:mx-1 sm:h-8" />
-                        <button 
-                          onClick={handleUpscale}
-                          disabled={isProcessing}
-                          className="flex min-w-0 flex-col items-center gap-0.5 rounded-xl px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-[#94a3b8] transition-colors hover:bg-emerald-500/10 hover:text-emerald-500 disabled:opacity-50 sm:px-4 sm:py-2 sm:text-[9px]"
-                        >
-                          {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUpCircle className="w-4 h-4" />}
-                          <span>AI Upscale</span>
-                        </button>
-                        <div className="mx-0.5 h-6 w-px bg-white/5 sm:mx-1 sm:h-8" />
-                        <button 
-                          onClick={handleGenerativeFill}
-                          disabled={isProcessing}
-                          className="flex min-w-0 flex-col items-center gap-0.5 rounded-xl px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-[#94a3b8] transition-colors hover:bg-blue-500/10 hover:text-blue-500 disabled:opacity-50 sm:px-4 sm:py-2 sm:text-[9px]"
-                        >
-                          {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                          <span>AI Bleed</span>
-                        </button>
-                        </div>
-                      </div>
+                          <img
+                            ref={imgRef}
+                            src={processedUrl}
+                            alt="Processed"
+                            className={cn(
+                              "h-full w-full object-cover transition-all duration-300",
+                              settings.simulateCMYK && "simulate-cmyk",
+                            )}
+                          />
 
-                      {settings.showGuides && (
+                          {settings.showGuides && (
                         <div className="absolute inset-0 pointer-events-none overflow-hidden">
                           {(() => {
                             const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
@@ -1583,6 +2234,99 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                           })()}
                         </div>
                       )}
+                          <ProcessingOverlay
+                            visible={isProcessing || isAnalyzing}
+                            message={processing.message}
+                            log={processing.log}
+                            elapsedSec={processing.elapsedSec}
+                            progress={processing.progress}
+                          />
+                    </div>
+                      </div>
+
+                      <div className="flex shrink-0 flex-wrap items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleImposition()}
+                            disabled={isProcessing}
+                            className={cn(
+                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
+                              "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
+                            )}
+                          >
+<LayoutGrid className="h-4 w-4 shrink-0 text-amber-500" />
+                            <span>Imposition</span>
+                          </button>
+
+                          <div ref={aiUpscaleMenuRef} className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setAiUpscaleMenuOpen((o) => !o)}
+                              disabled={isProcessing}
+                              className={cn(
+                                "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
+                                aiUpscaleMenuOpen
+                                  ? "border-amber-500/45 bg-amber-500/10 text-[var(--text)]"
+                                  : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
+                              )}
+                            >
+<ArrowUpCircle className="h-4 w-4 shrink-0 text-amber-500" />
+                              <span>AI Upscale</span>
+                              <ChevronDown
+                                className={cn(
+                                  "h-3.5 w-3.5 shrink-0 opacity-80 transition-transform",
+                                  aiUpscaleMenuOpen && "rotate-180",
+                                )}
+                              />
+                            </button>
+                            {aiUpscaleMenuOpen && (
+                              <div className="absolute bottom-full left-1/2 z-[60] mb-2 w-[12.5rem] -translate-x-1/2 rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] p-1.5 shadow-lg">
+                                <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                                  Mod upscale
+                                </p>
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[11px] font-semibold text-[var(--text)] transition-colors hover:bg-amber-500/10"
+                                  onClick={() => {
+                                    setAiUpscaleMenuOpen(false);
+                                    void handleUpscale("extend");
+                                  }}
+                                >
+                                  Extend
+                                  {(settings.upscaleMode ?? "extend") === "extend" && (
+                                    <Check className="h-3.5 w-3.5 text-amber-500" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[11px] font-semibold text-[var(--text)] transition-colors hover:bg-amber-500/10"
+                                  onClick={() => {
+                                    setAiUpscaleMenuOpen(false);
+                                    void handleUpscale("recompose");
+                                  }}
+                                >
+                                  Recompose
+                                  {settings.upscaleMode === "recompose" && (
+                                    <Check className="h-3.5 w-3.5 text-amber-500" />
+                                  )}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerativeFill()}
+                            disabled={isProcessing}
+                            className={cn(
+                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
+                              "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
+                            )}
+                          >
+<Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
+                            <span>AI Bleed</span>
+                          </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="text-center space-y-4 opacity-30">
@@ -1591,91 +2335,313 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
                     </div>
                   )}
                 </div>
+                    </div>
+                  </>
+                )}
               </div>
+            </div>
 
-              <div className="flex flex-col overflow-hidden rounded-3xl border border-[#2d333b] bg-[#16191e]">
-                <div className="flex flex-col items-center gap-3 border-b border-[#2d333b] p-4 text-center sm:flex-row sm:p-6 sm:text-left">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/20">
-                    <Mic className="h-5 w-5 text-amber-500" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-bold uppercase tracking-widest">AI Print Agent</h3>
-                    <p className="text-[10px] text-[#94a3b8]">Voice & Text Assistant</p>
-                  </div>
-                </div>
-
-                <div className="custom-scrollbar flex-1 space-y-4 overflow-y-auto bg-[#0d1117]/30 p-4 sm:p-6">
-                  {chatMessages.length === 0 && (
-                    <div className="h-full flex flex-col items-center justify-center text-center gap-4 opacity-30 px-8">
-                      <div className="w-16 h-16 rounded-full bg-[#1a1d23] flex items-center justify-center">
-                        <Mic className="w-8 h-8" />
-                      </div>
-                      <p className="text-xs">"Setează formatul A3 și adaugă 3mm bleed"</p>
-                      <p className="text-[10px]">Try asking me to configure your print settings or process the file.</p>
-                    </div>
-                  )}
-                  {chatMessages.map((msg, i) => (
-                    <div key={i} className={cn(
-                      "flex flex-col gap-1 max-w-[85%]",
-                      msg.role === 'user' ? "ml-auto items-end" : "items-start"
-                    )}>
-                      <div className={cn(
-                        "px-4 py-2.5 rounded-2xl text-xs leading-relaxed shadow-sm",
-                        msg.role === 'user' 
-                          ? "bg-amber-500 text-black font-medium rounded-tr-none" 
-                          : "bg-[#1a1d23] border border-[#2d333b] text-[#e6edf3] rounded-tl-none"
-                      )}>
-                        {msg.content}
-                      </div>
-                    </div>
-                  ))}
-                  {isTyping && (
-                    <div className="flex items-center gap-1 px-4 py-2 bg-[#1a1d23] border border-[#2d333b] rounded-2xl rounded-tl-none w-16">
-                      <div className="w-1 h-1 bg-amber-500 rounded-full animate-bounce" />
-                      <div className="w-1 h-1 bg-amber-500 rounded-full animate-bounce [animation-delay:0.2s]" />
-                      <div className="w-1 h-1 bg-amber-500 rounded-full animate-bounce [animation-delay:0.4s]" />
-                    </div>
-                  )}
-                </div>
-
-                <div className="p-4 bg-[#16191e] border-t border-[#2d333b]">
-                  <div className="relative">
-                    <input 
-                      ref={agentInputRef}
-                      type="text" 
-                      placeholder="Ask the AI agent..."
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          handleSendMessage(e.currentTarget.value);
-                          e.currentTarget.value = '';
-                        }
-                      }}
-                      className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-2xl px-4 py-3 pr-12 text-sm focus:outline-none focus:border-amber-500 transition-colors"
-                    />
+            <div
+              className={cn(
+                "min-h-0 shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-out lg:flex lg:h-full lg:min-h-0",
+                rightToolsOpen
+                  ? "flex w-full lg:w-[380px] lg:max-w-[380px]"
+                  : "hidden lg:flex lg:w-[3.25rem] lg:max-w-[3.25rem]",
+              )}
+            >
+              {!rightToolsOpen ? (
+                <aside className="flex min-h-0 flex-1 flex-col items-center gap-3 border-l border-[var(--border)] bg-[var(--surface-elevated)]/30 py-3 lg:min-h-0">
+                  <button
+                    type="button"
+                    onClick={() => setRightToolsOpen(true)}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--card)]/80 p-2 text-[var(--text-muted)] transition-colors hover:border-amber-500/40 hover:text-amber-400"
+                    title="Arată panoul Agent AI și Verificare calitate"
+                    aria-label="Arată panoul Agent AI și Verificare calitate"
+                  >
+                    <PanelLeft className="h-4 w-4 rotate-180" />
+                  </button>
+                  <div className="flex flex-col gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                        const el = agentInputRef.current;
-                        if (!el) return;
-                        handleSendMessage(el.value);
-                        el.value = '';
+                        setRightToolsTab("agent");
+                        setRightToolsOpen(true);
                       }}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-[#94a3b8] hover:text-amber-500 transition-colors"
-                      aria-label="Send message"
+                      className="rounded-lg border border-transparent p-2 text-[#64748b] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+                      title="Agent AI"
+                      aria-label="Deschide Agent AI"
                     >
-                      <Send className="w-4 h-4" />
+                      <Bot className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRightToolsTab("quality");
+                        setRightToolsOpen(true);
+                      }}
+                      className="rounded-lg border border-transparent p-2 text-[#64748b] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+                      title="Verificare calitate"
+                      aria-label="Deschide Verificare calitate"
+                    >
+                      <Zap className="h-4 w-4" />
                     </button>
                   </div>
-                </div>
-              </div>
+                </aside>
+              ) : (
+                <aside className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] lg:min-h-0">
+                  <div className="flex shrink-0 items-stretch gap-0 border-b border-[var(--border)] bg-[var(--surface-elevated)]">
+                    <button
+                      type="button"
+                      onClick={() => setRightToolsTab("agent")}
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center justify-center gap-1.5 border-b-2 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wide transition-colors sm:text-[11px]",
+                        rightToolsTab === "agent"
+                          ? "border-amber-500 text-amber-400"
+                          : "border-transparent text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]",
+                      )}
+                    >
+                      <Bot className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
+                      <span className="truncate">Agent AI</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRightToolsTab("quality")}
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center justify-center gap-1.5 border-b-2 px-2 py-2.5 text-[10px] font-bold uppercase tracking-wide transition-colors sm:text-[11px]",
+                        rightToolsTab === "quality"
+                          ? "border-amber-500 text-amber-400"
+                          : "border-transparent text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text)]",
+                      )}
+                    >
+                      <Zap className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
+                      <span className="truncate">Calitate</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRightToolsOpen(false)}
+                      className="shrink-0 border-l border-[var(--border)] px-2.5 text-[var(--text-muted)] transition-colors hover:bg-white/5 hover:text-amber-400"
+                      title="Ascunde panoul"
+                      aria-label="Ascunde panoul Agent și calitate"
+                    >
+                      <PanelRight className="mx-auto h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {rightToolsTab === "agent" && (
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-[var(--border)] px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={startListening}
+                          className={cn(
+                            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition-colors",
+                            isListening
+                              ? "border-red-500/40 bg-red-500/10 text-red-400"
+                              : "border-[var(--border)] bg-[var(--card)]/80 text-[var(--text-muted)] hover:border-amber-500/35 hover:text-amber-400",
+                          )}
+                          title={isListening ? "Ascult… (apasă din nou pentru a opri)" : "Dictează mesajul pentru agent"}
+                        >
+                          <Mic className="h-4 w-4 shrink-0" />
+                          <span>Voce</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSelectKey}
+                          className={cn(
+                            "flex items-center justify-center rounded-lg border p-2 transition-colors",
+                            hasKey
+                              ? "border-transparent bg-transparent text-[#64748b] hover:bg-white/5 hover:text-[var(--text-muted)]"
+                              : "border-amber-500/35 bg-amber-500/10 text-amber-400 hover:bg-amber-500/15",
+                          )}
+                          title={
+                            hasKey
+                              ? "Schimbă cheia API (OpenAI / Gemini)"
+                              : "Adaugă cheie API — necesară pentru unele funcții AI"
+                          }
+                          aria-label={hasKey ? "Schimbă cheia API" : "Adaugă cheie API"}
+                        >
+                          <Key className="h-4 w-4 shrink-0" />
+                        </button>
+                      </div>
+
+                      <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto bg-[#0d1117]/25 p-3 sm:p-3">
+                        {chatMessages.length === 0 && (
+                          <div className="flex h-full min-h-[8rem] flex-col items-center justify-center gap-4 px-6 py-8 text-center opacity-30">
+                            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#1a1d23]">
+                              <Mic className="h-8 w-8" />
+                            </div>
+                            <p className="text-xs">„Setează formatul A3 și adaugă 3mm bleed”</p>
+                            <p className="text-[10px]">Întreabă despre setări tipar sau procesare fișier.</p>
+                          </div>
+                        )}
+                        {chatMessages.map((msg, i) => (
+                          <div
+                            key={i}
+                            className={cn(
+                              "flex max-w-[85%] flex-col gap-1",
+                              msg.role === "user" ? "ml-auto items-end" : "items-start",
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                "rounded-2xl px-4 py-2.5 text-xs leading-relaxed shadow-sm",
+                                msg.role === "user"
+                                  ? "rounded-tr-none bg-amber-500 font-medium text-black"
+                                  : "rounded-tl-none border border-[#2d333b] bg-[#1a1d23] text-[#e6edf3]",
+                              )}
+                            >
+                              {msg.content}
+                            </div>
+                          </div>
+                        ))}
+                        {isTyping && (
+                          <div className="flex w-16 items-center gap-1 rounded-2xl rounded-tl-none border border-[#2d333b] bg-[#1a1d23] px-4 py-2">
+                            <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500" />
+                            <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500 [animation-delay:0.2s]" />
+                            <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500 [animation-delay:0.4s]" />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface-elevated)] p-3">
+                        <div className="relative">
+                          <input
+                            ref={agentInputRef}
+                            type="text"
+                            placeholder="Ex.: setează bleed 3mm, format A4…"
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                handleSendMessage(e.currentTarget.value);
+                                e.currentTarget.value = "";
+                              }
+                            }}
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--card)] py-2.5 pl-3 pr-10 text-sm focus:border-amber-500 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const el = agentInputRef.current;
+                              if (!el) return;
+                              handleSendMessage(el.value);
+                              el.value = "";
+                            }}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-[#94a3b8] transition-colors hover:text-amber-500"
+                            aria-label="Trimite mesajul"
+                          >
+                            <Send className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {rightToolsTab === "quality" && (
+                    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 sm:gap-4 sm:p-4">
+                      <div className="flex shrink-0 flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
+                        <p className="text-[10px] text-[var(--text-muted)] sm:max-w-[55%]">
+                          DPI, margini, recomandări pentru tipar.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => void handleAIAnalysis()}
+                          disabled={!file || isAnalyzing}
+                          className="w-full shrink-0 rounded-lg bg-amber-500 px-3 py-2 text-[11px] font-bold uppercase text-black transition-colors hover:bg-amber-400 disabled:opacity-50 sm:w-auto"
+                        >
+                          {isAnalyzing ? "Analizez…" : "Rulează verificarea"}
+                        </button>
+                      </div>
+
+                      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[#0d1117]/80 p-3">
+                        {analysis ? (
+                          <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-[#94a3b8]">Estimare risc tipar</span>
+                              <span
+                                className={cn(
+                                  "rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wide",
+                                  analysis.currentEstimatedQuality === "high"
+                                    ? "bg-green-500/20 text-green-500"
+                                    : analysis.currentEstimatedQuality === "medium"
+                                      ? "bg-amber-500/20 text-amber-500"
+                                      : "bg-red-500/20 text-red-500",
+                                )}
+                              >
+                                {analysis.currentEstimatedQuality === "high"
+                                  ? "Nivel ridicat"
+                                  : analysis.currentEstimatedQuality === "medium"
+                                    ? "Nivel mediu"
+                                    : "Nivel redus"}
+                              </span>
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Issues Detected</p>
+                              {analysis.issues.length > 0 ? (
+                                analysis.issues.map((issue: string, i: number) => (
+                                  <div key={i} className="flex items-center gap-2 text-xs text-red-400">
+                                    <AlertCircle className="h-3 w-3" />
+                                    {issue}
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="flex items-center gap-2 text-xs text-green-500">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  No critical issues found
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Recommendations</p>
+                              {analysis.recommendations.map((rec: string, i: number) => (
+                                <div key={i} className="flex items-start gap-2 text-xs text-[#94a3b8]">
+                                  <ChevronRight className="mt-0.5 h-3 w-3 shrink-0" />
+                                  {rec}
+                                </div>
+                              ))}
+                            </div>
+
+                            {analysis.canUpscaleHelp && (
+                              <button
+                                type="button"
+                                onClick={() => void handleUpscale()}
+                                className="w-full rounded-lg border border-amber-500/20 bg-amber-500/10 py-2 text-[10px] font-bold uppercase text-amber-500 transition-colors hover:bg-amber-500/20"
+                              >
+                                Upscale to fix resolution
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex h-full min-h-[10rem] flex-col items-center justify-center gap-3 text-center opacity-30">
+                            <Search className="h-8 w-8" />
+                            <p className="text-xs">Încarcă un fișier și rulează verificarea</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </aside>
+              )}
+            </div>
             </div>
           </div>
-        </div>
       </main>
 
-      <AnimatePresence>
+      {!rightToolsOpen && (
+        <button
+          type="button"
+          className="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-elevated)] text-amber-400 shadow-lg transition-colors hover:border-amber-500/45 hover:bg-amber-500/10 lg:hidden"
+          onClick={() => setRightToolsOpen(true)}
+          aria-label="Arată panoul Agent AI și Verificare calitate"
+        >
+          <Bot className="h-5 w-5" />
+        </button>
+      )}
+
+      <AnimatePresence mode="wait">
         {showMockup && processedUrl && (
-          <MockupViewer 
+          <MockupViewer
+            key="mockup-studio" 
             designImage={processedUrl}
             onClose={() => setShowMockup(false)}
             initialType={mockupType}
@@ -1684,6 +2650,41 @@ export function PrintWorkspace({ user, history }: PrintWorkspaceProps) {
           />
         )}
       </AnimatePresence>
+
+      <AiDualCompareDialog
+        open={!!dualImagePicker}
+        onClose={() => setDualImagePicker(null)}
+        title={
+          dualImagePicker?.flow === "upscale"
+            ? "Compară rezultate AI Upscale"
+            : "Compară rezultate AI Bleed"
+        }
+        subtitle={
+          dualImagePicker?.flow === "upscale"
+            ? "Alege varianta Gemini sau OpenAI. Poți descrie modificări punctuale sub fiecare imagine înainte de a alege."
+            : "Alege varianta pentru marginile de bleed. Poți rafina fiecare coloană cu un prompt înainte de a confirma."
+        }
+        gemini={{
+          imageUrl: dualImagePicker?.dual.gemini.imageUrl ?? null,
+          error: dualImagePicker?.dual.gemini.error,
+        }}
+        openai={{
+          imageUrl: dualImagePicker?.dual.openai.imageUrl ?? null,
+          error: dualImagePicker?.dual.openai.error,
+        }}
+        onPickGemini={finalizeWorkspaceDualPickGemini}
+        onPickOpenai={finalizeWorkspaceDualPickOpenai}
+        refineWithGemini={refineWorkspaceGemini}
+        refineWithOpenai={refineWorkspaceOpenai}
+        zIndexClass="z-[125]"
+      />
+
+      <AiSettingsModal
+        open={showAiSettings}
+        onClose={() => setShowAiSettings(false)}
+        onConfigureKeys={handleSelectKey}
+        onSaved={() => setHasKey(hasAnyAiKeyConfigured())}
+      />
     </div>
   );
 }

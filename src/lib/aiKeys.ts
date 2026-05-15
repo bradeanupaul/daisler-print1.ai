@@ -26,19 +26,30 @@ export function preferOpenAI(): boolean {
   return resolveOpenAIApiKey().trim().length > 0;
 }
 
-/** Pentru UI: există cheie din build sau din storage. */
-export function hasAnyAiKeyConfigured(): boolean {
-  const g =
+/** Gemini configurat (.env Vite sau localStorage). */
+export function hasGeminiKeyConfigured(): boolean {
+  const env =
     (typeof process !== "undefined" &&
       (process.env.GEMINI_API_KEY || process.env.API_KEY || "").trim()) ||
     "";
-  const o =
-    (typeof process !== "undefined" && (process.env.OPENAI_API_KEY || "").trim()) ||
-    "";
+  if (env) return true;
   if (typeof window !== "undefined") {
-    const lsG = window.localStorage.getItem("gemini_api_key")?.trim() || "";
-    const lsO = window.localStorage.getItem("openai_api_key")?.trim() || "";
-    return Boolean(g || o || lsG || lsO);
+    return Boolean(window.localStorage.getItem("gemini_api_key")?.trim());
   }
-  return Boolean(g || o);
+  return false;
+}
+
+/** OpenAI configurat (.env sau localStorage). */
+export function hasOpenAIKeyConfigured(): boolean {
+  const env = (typeof process !== "undefined" && (process.env.OPENAI_API_KEY || "").trim()) || "";
+  if (env) return true;
+  if (typeof window !== "undefined") {
+    return Boolean(window.localStorage.getItem("openai_api_key")?.trim());
+  }
+  return false;
+}
+
+/** Pentru UI: există cheie din build sau din storage. */
+export function hasAnyAiKeyConfigured(): boolean {
+  return hasGeminiKeyConfigured() || hasOpenAIKeyConfigured();
 }

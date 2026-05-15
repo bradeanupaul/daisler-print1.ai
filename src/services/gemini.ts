@@ -1,7 +1,17 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { preferOpenAI, resolveGeminiApiKey } from "../lib/aiKeys";
+import {
+  preferOpenAI,
+  resolveGeminiApiKey,
+  hasGeminiKeyConfigured,
+  hasOpenAIKeyConfigured,
+} from "../lib/aiKeys";
+import { loadAiAppSettings } from "../lib/aiAppSettings";
 import { buildUpscaleExtendOutpaintPrompt } from "../lib/extendOutpaintPrompt";
 import { buildUpscaleRecomposePrompt } from "../lib/recomposePrompt";
+import { resolveGeminiImageModel } from "../lib/geminiImageConfig";
+import { resolveGeminiTextModel } from "../lib/geminiTextConfig";
+import type { ProcessingStageReporter } from "../lib/processingStage";
+import { resolveImageForGemini, ensureImageDataUrl } from "../lib/imageDataUrl";
 import { composeExtendCenterContain, pickCanvasSizeForMmAspect } from "../lib/upscaleCompose";
 import type { UpscaleMode } from "../types";
 import * as openaiPrint from "./openaiPrint";
@@ -11,13 +21,18 @@ const getAI = () => {
   return new GoogleGenAI({ apiKey });
 };
 
+async function geminiInlineImage(imageUrl: string) {
+  const { mimeType, data } = await resolveImageForGemini(imageUrl);
+  return { inlineData: { data, mimeType } };
+}
+
 export async function processAgentMessage(message: string, currentSettings: any, hasFile: boolean) {
   if (preferOpenAI()) {
     return openaiPrint.processAgentMessage(message, currentSettings, hasFile);
   }
   const ai = getAI();
-  const model = "gemini-3-flash-preview";
-  
+  const model = resolveGeminiTextModel();
+
   const prompt = `
     You are an AI Print Agent for print1.ai Print Processor. 
     Your goal is to help users prepare their files for printing.
@@ -125,8 +140,8 @@ export async function analyzePrintQuality(imageData: string, targetDpi: number, 
     return openaiPrint.analyzePrintQuality(imageData, targetDpi, targetWidthMm, targetHeightMm);
   }
   const ai = getAI();
-  const model = "gemini-3-flash-preview";
-  
+  const model = resolveGeminiTextModel();
+
   const prompt = `
     Analyze this image for print quality. 
     Target: ${targetWidthMm}x${targetHeightMm}mm at ${targetDpi} DPI.
@@ -138,19 +153,18 @@ export async function analyzePrintQuality(imageData: string, targetDpi: number, 
     - canUpscaleHelp: boolean
     - colorWarnings: Array<{ color: string, reason: string }> (e.g., { color: "#00ff00", reason: "Out of CMYK gamut" })
     - boundingBoxes: Array<{ box_2d: [number, number, number, number], label: string }> (coordinates in 0-1000 scale: [ymin, xmin, ymax, xmax])
+
+    For issues and recommendations: be specific and technical (DPI, margins, blur, gamut, legibility). Do not output vague one-word judgments alone such as "slab", "slabă", "bun", "bon", "prost", "ok" — always tie statements to observable facts.
   `;
 
   try {
-    const mimeType = imageData.split(';')[0].split(':')[1] || "image/jpeg";
+    const imagePart = await geminiInlineImage(imageData);
     const response = await ai.models.generateContent({
       model,
       contents: [
         {
-          parts: [
-            { text: prompt },
-            { inlineData: { data: imageData.split(',')[1], mimeType } }
-          ]
-        }
+          parts: [{ text: prompt }, imagePart],
+        },
       ],
       config: {
         responseMimeType: "application/json"
@@ -203,37 +217,60 @@ function getClosestAspectRatio(width: number, height: number, model: string): st
   ).name;
 }
 
-export async function upscaleImage(
+export type UpscaleGenerationResult =
+  | { kind: "single"; imageUrl: string; provider: "gemini" | "openai" }
+  | {
+      kind: "dual";
+      gemini: { imageUrl: string | null; error?: string };
+      openai: { imageUrl: string | null; error?: string };
+    };
+
+/** Același contract pentru upscale, generative bleed, etc. */
+export type AiReconstructedImageResult = UpscaleGenerationResult;
+
+async function runDebugDualImageCompare(
+  geminiTask: Promise<string | null>,
+  openaiTask: Promise<string | null>
+): Promise<{
+  gemini: { imageUrl: string | null; error?: string };
+  openai: { imageUrl: string | null; error?: string };
+}> {
+  const wrap = (p: Promise<string | null>) =>
+    p.then(
+      (url) => ({ imageUrl: url, error: undefined as string | undefined }),
+      (e: unknown) => ({
+        imageUrl: null as string | null,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    );
+  const [gemini, openai] = await Promise.all([wrap(geminiTask), wrap(openaiTask)]);
+  return { gemini, openai };
+}
+
+async function upscaleImageGemini(
   imageData: string,
   targetW: number,
   targetH: number,
   formatName: string,
   bleedMm: number,
-  mode: UpscaleMode = "extend"
-) {
-  if (preferOpenAI()) {
-    return openaiPrint.upscaleImage(
-      imageData,
-      targetW,
-      targetH,
-      formatName,
-      bleedMm,
-      mode
-    );
-  }
+  mode: UpscaleMode = "extend",
+  reporter?: ProcessingStageReporter,
+): Promise<string | null> {
   const ai = getAI();
-  const model = "gemini-1.5-pro"; // Using Pro model for better layout intelligence and font reconstruction
+  const model = resolveGeminiImageModel();
   const aspectRatio = getClosestAspectRatio(targetW, targetH, model);
 
   const originalW = targetW - bleedMm * 2;
   const originalH = targetH - bleedMm * 2;
 
-  let inputDataUrl = imageData;
+  reporter?.stage("Gemini: pregătesc imaginea pentru API…");
+  let inputDataUrl = await ensureImageDataUrl(imageData);
   let prompt: string;
 
   if (mode === "extend") {
     const { width: cw, height: ch } = pickCanvasSizeForMmAspect(targetW, targetH);
-    inputDataUrl = await composeExtendCenterContain(imageData, cw, ch);
+    reporter?.stage(`Gemini: compun canvas extend (${cw}×${ch}px)…`);
+    inputDataUrl = await composeExtendCenterContain(inputDataUrl, cw, ch);
     prompt = buildUpscaleExtendOutpaintPrompt({
       formatName,
       targetW,
@@ -252,15 +289,188 @@ Net trim (after bleed): ~${originalW}×${originalH} mm.`;
   }
 
   try {
-    const mimeType = inputDataUrl.split(";")[0].split(":")[1] || "image/jpeg";
+    reporter?.stage(`Gemini: trimit cerere (${model}, 2K)…`);
+    const imagePart = await geminiInlineImage(inputDataUrl);
     const response = await ai.models.generateContent({
       model,
       contents: [
         {
-          parts: [
-            { text: prompt },
-            { inlineData: { data: inputDataUrl.split(",")[1], mimeType } },
-          ],
+          parts: [{ text: prompt }, imagePart],
+        },
+      ],
+      config: {
+        imageConfig: {
+          aspectRatio,
+          imageSize: "2K",
+        },
+      },
+    });
+
+    reporter?.stage("Gemini: primesc răspunsul…");
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        reporter?.stage("Gemini: imagine generată.");
+        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("AI Upscale failed (Gemini):", error);
+    throw error;
+  }
+}
+
+/** Upscale / recompose / extend: cu mod debug + ambele chei → Gemini și OpenAI în paralele; altfel ruta unică (preferOpenAI). */
+export async function upscaleImage(
+  imageData: string,
+  targetW: number,
+  targetH: number,
+  formatName: string,
+  bleedMm: number,
+  mode: UpscaleMode = "extend",
+  reporter?: ProcessingStageReporter,
+): Promise<UpscaleGenerationResult> {
+  const app = loadAiAppSettings();
+  const gOk = hasGeminiKeyConfigured();
+  const oOk = hasOpenAIKeyConfigured();
+
+  if (app.debugCompareImageModels && gOk && oOk) {
+    reporter?.stage("Generez în paralel: Gemini + OpenAI…");
+    const { gemini, openai } = await runDebugDualImageCompare(
+      upscaleImageGemini(imageData, targetW, targetH, formatName, bleedMm, mode, {
+        stage: (m) => reporter?.stage(m),
+      }),
+      openaiPrint.upscaleImage(imageData, targetW, targetH, formatName, bleedMm, mode, reporter),
+    );
+    return { kind: "dual", gemini, openai };
+  }
+
+  if (preferOpenAI()) {
+    const url = await openaiPrint.upscaleImage(
+      imageData,
+      targetW,
+      targetH,
+      formatName,
+      bleedMm,
+      mode,
+      reporter,
+    );
+    if (!url) throw new Error("EMPTY_RESPONSE");
+    return { kind: "single", imageUrl: url, provider: "openai" };
+  }
+
+  const url = await upscaleImageGemini(imageData, targetW, targetH, formatName, bleedMm, mode, reporter);
+  if (!url) throw new Error("EMPTY_RESPONSE");
+  return { kind: "single", imageUrl: url, provider: "gemini" };
+}
+
+async function generativeFillGemini(
+  imageData: string,
+  bleedMm: number,
+  targetWidthMm: number,
+  targetHeightMm: number,
+  reporter?: ProcessingStageReporter,
+): Promise<string | null> {
+  const ai = getAI();
+  const model = resolveGeminiImageModel();
+  const totalW = targetWidthMm + 2 * bleedMm;
+  const totalH = targetHeightMm + 2 * bleedMm;
+  const aspectRatio = getClosestAspectRatio(totalW, totalH, model);
+
+  const prompt = `
+    DESIGN EXTENSION for print: extend the artwork outward by ${bleedMm}mm on all sides.
+    The original ${targetWidthMm}×${targetHeightMm}mm content must remain SACRED and UNTOUCHED in the center.
+    Continue structural patterns from the edges (radial sunbursts, rays, stripes, halftone, grids, ornamental frames, texture) with correct geometry — do not replace extended areas with a single flat cream/beige/paper color when the source shows repeating or radial structure.
+    Fill the ${aspectRatio} frame with believable design continuation, not empty voids. No white edges, no added borders.
+  `;
+
+  try {
+    reporter?.stage("Gemini: pregătesc imaginea pentru bleed…");
+    const imagePart = await geminiInlineImage(imageData);
+    reporter?.stage(`Gemini: trimit cerere bleed (${model}, 2K)…`);
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          parts: [{ text: prompt }, imagePart],
+        },
+      ],
+      config: {
+        imageConfig: {
+          aspectRatio,
+          imageSize: "2K",
+        },
+      },
+    });
+
+    reporter?.stage("Gemini: primesc răspunsul bleed…");
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        reporter?.stage("Gemini: bleed generat.");
+        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Generative Fill failed (Gemini):", error);
+    throw error;
+  }
+}
+
+/** Bleed generativ: cu mod debug + ambele chei → Gemini și OpenAI în paralele. */
+export async function generativeFill(
+  imageData: string,
+  bleedMm: number,
+  targetWidthMm: number,
+  targetHeightMm: number,
+  reporter?: ProcessingStageReporter,
+): Promise<AiReconstructedImageResult> {
+  const app = loadAiAppSettings();
+  const gOk = hasGeminiKeyConfigured();
+  const oOk = hasOpenAIKeyConfigured();
+
+  if (app.debugCompareImageModels && gOk && oOk) {
+    reporter?.stage("Generez bleed în paralel: Gemini + OpenAI…");
+    const { gemini, openai } = await runDebugDualImageCompare(
+      generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, {
+        stage: (m) => reporter?.stage(m),
+      }),
+      openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter),
+    );
+    return { kind: "dual", gemini, openai };
+  }
+
+  if (preferOpenAI()) {
+    const url = await openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter);
+    if (!url) throw new Error("EMPTY_RESPONSE");
+    return { kind: "single", imageUrl: url, provider: "openai" };
+  }
+
+  const url = await generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter);
+  if (!url) throw new Error("EMPTY_RESPONSE");
+  return { kind: "single", imageUrl: url, provider: "gemini" };
+}
+
+/** Rafinare pe o singură imagine (ex. din dialogul de comparare). Un apel Gemini. */
+export async function refineGeminiImageFromPrompt(
+  imageDataUrl: string,
+  userInstruction: string
+): Promise<string | null> {
+  const ai = getAI();
+  const model = resolveGeminiImageModel();
+  const aspectRatio = getClosestAspectRatio(210, 297, model);
+  const prompt = `Edit this image for professional print output. Apply ONLY what the user asks. Keep composition coherent unless they request layout changes. No watermarks.
+
+User instruction:
+${userInstruction}`;
+
+  try {
+    const imagePart = await geminiInlineImage(imageDataUrl);
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          parts: [{ text: prompt }, imagePart],
         },
       ],
       config: {
@@ -278,67 +488,29 @@ Net trim (after bleed): ~${originalW}×${originalH} mm.`;
     }
     return null;
   } catch (error) {
-    console.error("AI Upscale failed:", error);
+    console.error("refineGeminiImageFromPrompt failed:", error);
     throw error;
   }
 }
 
-export async function generativeFill(imageData: string, bleedMm: number, targetWidthMm: number, targetHeightMm: number) {
-  if (preferOpenAI()) {
-    return openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm);
-  }
-  const ai = getAI();
-  const model = "gemini-3.1-flash-image-preview";
-  const totalW = targetWidthMm + 2 * bleedMm;
-  const totalH = targetHeightMm + 2 * bleedMm;
-  const aspectRatio = getClosestAspectRatio(totalW, totalH, model);
-  
-  const prompt = `
-    DESIGN EXTENSION for print: extend the artwork outward by ${bleedMm}mm on all sides.
-    The original ${targetWidthMm}×${targetHeightMm}mm content must remain SACRED and UNTOUCHED in the center.
-    Continue structural patterns from the edges (radial sunbursts, rays, stripes, halftone, grids, ornamental frames, texture) with correct geometry — do not replace extended areas with a single flat cream/beige/paper color when the source shows repeating or radial structure.
-    Fill the ${aspectRatio} frame with believable design continuation, not empty voids. No white edges, no added borders.
-  `;
+export type MockupImageProvider = "gemini" | "openai";
 
-  try {
-    const mimeType = imageData.split(';')[0].split(':')[1] || "image/jpeg";
-    const response = await ai.models.generateContent({
-      model,
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            { inlineData: { data: imageData.split(',')[1], mimeType } }
-          ]
-        }
-      ],
-      config: {
-        imageConfig: {
-          aspectRatio,
-          imageSize: "2K"
-        }
-      }
-    });
+export type MockupGenerationResult =
+  | { kind: "single"; imageUrl: string; provider: MockupImageProvider }
+  | {
+      kind: "dual";
+      gemini: { imageUrl: string | null; error?: string };
+      openai: { imageUrl: string | null; error?: string };
+    };
 
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-      }
-    }
-    return null;
-  } catch (error) {
-    console.error("Generative Fill failed:", error);
-    throw error;
-  }
-}
-
-export async function generateCustomMockup(userPrompt: string, designImageData: string, apiKey?: string) {
-  if (preferOpenAI()) {
-    return openaiPrint.generateCustomMockup(userPrompt, designImageData, apiKey);
-  }
+async function generateCustomMockupGemini(
+  userPrompt: string,
+  designImageData: string,
+  apiKey?: string
+): Promise<string | null> {
   const ai = apiKey ? new GoogleGenAI({ apiKey }) : getAI();
-  const model = "gemini-2.5-flash-image";
-  
+  const model = resolveGeminiImageModel();
+
   const systemPrompt = `
     You are an expert product photographer and mockup generator. 
     The user wants to see their design on a specific product described in their message.
@@ -354,35 +526,79 @@ export async function generateCustomMockup(userPrompt: string, designImageData: 
   `;
 
   try {
-    const mimeType = designImageData.split(';')[0].split(':')[1] || "image/jpeg";
+    const imagePart = await geminiInlineImage(designImageData);
     const response = await ai.models.generateContent({
       model,
       contents: [
         {
-          parts: [
-            { text: systemPrompt },
-            { inlineData: { data: designImageData.split(',')[1], mimeType } }
-          ]
-        }
+          parts: [{ text: systemPrompt }, imagePart],
+        },
       ],
       config: {
         imageConfig: {
-          aspectRatio: "1:1"
-        }
-      }
+          aspectRatio: "1:1",
+        },
+      },
     });
 
     for (const part of response.candidates?.[0]?.content?.parts || []) {
       if (part.inlineData) {
-        return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
       }
     }
     return null;
-  } catch (error: any) {
-    console.error("Custom Mockup Generation failed:", error);
-    if (error.message?.includes("Requested entity was not found") || error.message?.includes("API_KEY_INVALID") || error.message?.toLowerCase().includes("invalid api key")) {
+  } catch (error: unknown) {
+    console.error("Custom Mockup Generation failed (Gemini):", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    if (
+      msg.includes("Requested entity was not found") ||
+      msg.includes("API_KEY_INVALID") ||
+      msg.toLowerCase().includes("invalid api key")
+    ) {
       throw new Error("INVALID_API_KEY");
     }
     throw error;
   }
+}
+
+/** Mockup AI: respectă setările din `aiAppSettings` (model primar, mod debug dual). */
+export async function generateCustomMockup(
+  userPrompt: string,
+  designImageData: string,
+  apiKey?: string
+): Promise<MockupGenerationResult> {
+  const app = loadAiAppSettings();
+  const gOk = hasGeminiKeyConfigured();
+  const oOk = hasOpenAIKeyConfigured();
+
+  if (app.debugCompareImageModels && gOk && oOk) {
+    const { gemini, openai } = await runDebugDualImageCompare(
+      generateCustomMockupGemini(userPrompt, designImageData, apiKey),
+      openaiPrint.generateCustomMockup(userPrompt, designImageData, apiKey)
+    );
+    return { kind: "dual", gemini, openai };
+  }
+
+  const tryOrder: MockupImageProvider[] =
+    app.primaryImageProvider === "openai" ? ["openai", "gemini"] : ["gemini", "openai"];
+
+  let lastErr: unknown;
+  for (const provider of tryOrder) {
+    if (provider === "gemini" && !gOk) continue;
+    if (provider === "openai" && !oOk) continue;
+    try {
+      const url =
+        provider === "gemini"
+          ? await generateCustomMockupGemini(userPrompt, designImageData, apiKey)
+          : await openaiPrint.generateCustomMockup(userPrompt, designImageData, apiKey);
+      if (url) return { kind: "single", imageUrl: url, provider };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  if (lastErr instanceof Error) throw lastErr;
+  throw new Error(
+    "Nu există cheie API pentru modelul ales. Adaugă Gemini și/sau OpenAI în setări sau .env."
+  );
 }
