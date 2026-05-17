@@ -4,17 +4,35 @@
  */
 import OpenAI, { toFile } from "openai";
 import { resolveOpenAIApiKey } from "../lib/aiKeys";
+import { aiError, aiLog } from "../lib/aiUpscaleLog";
 import {
-  resolveOpenAIImageCritiqueEnabled,
-  resolveOpenAIImageMaxPasses,
+  resolveImageCritiqueEnabled,
+  resolveImageMaxPasses,
+} from "../lib/aiImageQualityConfig";
+import {
+  isOpenAIDalle2Model,
+  isOpenAIDalle3Model,
+  resolveDalle3QualityForDpi,
   resolveOpenAIImageModel,
-  resolveOpenAIImageQuality,
+  resolveOpenAIImageModelForEdit,
+  resolveOpenAIImageQualityForDpi,
 } from "../lib/openaiImageConfig";
+import {
+  appendCritiqueToPrompt,
+  buildImageCritiqueInstruction,
+  parseImageCritiqueJson,
+} from "../lib/imageCritique";
+import {
+  formatGenerationProfileHint,
+  resolvePrintGenerationProfile,
+} from "../lib/printGenerationProfile";
+import { prepareImageForAiUpscale } from "../lib/imageDataUrl";
 import { buildUpscaleExtendOutpaintPrompt } from "../lib/extendOutpaintPrompt";
 import { buildUpscaleRecomposePrompt } from "../lib/recomposePrompt";
 import { composeExtendCenterContain, pickCanvasSizeForMmAspect } from "../lib/upscaleCompose";
 import type { UpscaleMode } from "../types";
 import type { ProcessingStageReporter } from "../lib/processingStage";
+import { usageFromReporter } from "../lib/processingStage";
 import { resolveOpenAIAgentModel, resolveOpenAIVisionModel } from "../lib/openaiTextConfig";
 
 function getClient(): OpenAI {
@@ -33,9 +51,9 @@ async function dataUrlToUploadable(dataUrl: string) {
   return toFile(blob, "input.png", { type });
 }
 
-function pickEditSize(
+function pickGptImageEditSize(
   wMm: number,
-  hMm: number
+  hMm: number,
 ): "1024x1024" | "1536x1024" | "1024x1536" | "auto" {
   if (wMm <= 0 || hMm <= 0) return "auto";
   const r = wMm / hMm;
@@ -44,23 +62,127 @@ function pickEditSize(
   return "1024x1024";
 }
 
+function pickDalle2EditSize(): "256x256" | "512x512" | "1024x1024" {
+  return "1024x1024";
+}
+
+function pickDalle3Size(
+  wMm: number,
+  hMm: number,
+): "1024x1024" | "1792x1024" | "1024x1792" {
+  if (wMm <= 0 || hMm <= 0) return "1024x1024";
+  const r = wMm / hMm;
+  if (r >= 1.35) return "1792x1024";
+  if (r <= 0.75) return "1024x1792";
+  return "1024x1024";
+}
+
+function extractB64FromImagesResponse(rsp: OpenAI.Images.ImagesResponse): string | null {
+  return rsp.data?.[0]?.b64_json ?? null;
+}
+
+async function ensureSquarePngDataUrl(imageData: string, side: number): Promise<string> {
+  const dataUrl = await prepareImageForAiUpscale(imageData);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = side;
+      canvas.height = side;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas 2D indisponibil"));
+        return;
+      }
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, side, side);
+      const nw = img.naturalWidth || img.width;
+      const nh = img.naturalHeight || img.height;
+      const scale = Math.min(side / nw, side / nh);
+      const dw = nw * scale;
+      const dh = nh * scale;
+      ctx.drawImage(img, (side - dw) / 2, (side - dh) / 2, dw, dh);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () => reject(new Error("Încărcare imagine eșuată"));
+    img.src = dataUrl;
+  });
+}
+
+async function dalle3GenerateSingle(
+  prompt: string,
+  widthMmHint: number,
+  heightMmHint: number,
+  reporter?: ProcessingStageReporter,
+  targetDpi?: number,
+): Promise<string | null> {
+  const client = getClient();
+  const model = "dall-e-3";
+  const size = pickDalle3Size(widthMmHint, heightMmHint);
+  const quality = resolveDalle3QualityForDpi(targetDpi);
+  const rsp = await client.images.generate({
+    model,
+    prompt: prompt.slice(0, 4000),
+    n: 1,
+    size,
+    quality,
+    response_format: "b64_json",
+  });
+  usageFromReporter(reporter)?.recordOpenAIImageEdit(model, "images.generate (DALL-E 3)", rsp, {
+    quality,
+    size,
+  });
+  const b64 = extractB64FromImagesResponse(rsp);
+  if (b64) return `data:image/png;base64,${b64}`;
+  return null;
+}
+
 async function imageEditSingle(
   imageData: string,
   prompt: string,
   widthMmHint: number,
-  heightMmHint: number
+  heightMmHint: number,
+  reporter?: ProcessingStageReporter,
+  targetDpi?: number,
 ): Promise<string | null> {
   const client = getClient();
+  const model = resolveOpenAIImageModelForEdit();
+
+  if (isOpenAIDalle3Model(model)) {
+    return dalle3GenerateSingle(prompt, widthMmHint, heightMmHint, reporter, targetDpi);
+  }
+
+  if (isOpenAIDalle2Model(model)) {
+    const size = pickDalle2EditSize();
+    const side = size === "1024x1024" ? 1024 : 512;
+    const square = await ensureSquarePngDataUrl(imageData, side);
+    const image = await dataUrlToUploadable(square);
+    const rsp = await client.images.edit({
+      model: "dall-e-2",
+      image,
+      prompt: prompt.slice(0, 1000),
+      n: 1,
+      size,
+      response_format: "b64_json",
+    });
+    usageFromReporter(reporter)?.recordOpenAIImageEdit(model, "images.edit (DALL-E 2)", rsp, { size });
+    const b64 = extractB64FromImagesResponse(rsp);
+    if (b64) return `data:image/png;base64,${b64}`;
+    return null;
+  }
+
   const image = await dataUrlToUploadable(imageData);
-  const size = pickEditSize(widthMmHint, heightMmHint);
+  const size = pickGptImageEditSize(widthMmHint, heightMmHint);
+  const quality = resolveOpenAIImageQualityForDpi(targetDpi);
   const rsp = await client.images.edit({
-    model: resolveOpenAIImageModel() as any,
+    model: model as "gpt-image-1" | "gpt-image-2",
     image,
     prompt,
-    quality: resolveOpenAIImageQuality(),
+    quality,
     size,
   });
-  const b64 = rsp.data?.[0]?.b64_json;
+  usageFromReporter(reporter)?.recordOpenAIImageEdit(model, "images.edit", rsp);
+  const b64 = extractB64FromImagesResponse(rsp);
   if (!b64) return null;
   return `data:image/png;base64,${b64}`;
 }
@@ -70,13 +192,15 @@ export async function quickImageEditFromPrompt(
   imageData: string,
   userInstruction: string,
   widthMmHint = 210,
-  heightMmHint = 297
+  heightMmHint = 297,
+  reporter?: ProcessingStageReporter,
+  targetDpi?: number,
 ): Promise<string | null> {
   const prompt = `Edit this image for professional print output. Apply the user's change precisely. No watermarks; preserve readability.
 
 User instruction:
 ${userInstruction}`;
-  return imageEditSingle(imageData, prompt, widthMmHint, heightMmHint);
+  return imageEditSingle(imageData, prompt, widthMmHint, heightMmHint, reporter, targetDpi);
 }
 
 type CritiqueContext = {
@@ -87,40 +211,20 @@ type CritiqueContext = {
 async function critiqueGeneratedImage(
   generatedDataUrl: string,
   intentSummary: string,
-  referenceDataUrl: string
+  referenceDataUrl: string,
+  reporter?: ProcessingStageReporter,
 ): Promise<{
   shouldRegenerate: boolean;
   issues: string[];
   promptAddendum: string;
 }> {
   const client = getClient();
-  const instruction = `You are strict QA for AI print / outpainting / mockup generation.
-
-INTENT (what the edit should achieve):
-${intentSummary.slice(0, 3500)}
-
-Two images follow in order:
-1) REFERENCE = input before this generation step (layout / artwork as sent to the image model).
-2) OUTPUT = the generated image to judge.
-
-Return ONE JSON object only:
-{
-  "shouldRegenerate": boolean,
-  "issues": string[],
-  "promptAddendum": string
-}
-
-Set shouldRegenerate true ONLY for clear defects: obvious seams; large flat-color fills where the reference shows structured patterns (radial rays, stripes, grids); cropped or damaged central artwork that must stay intact; unreadable garbled text; watermarks; severe banding.
-For OUTPAINTING / EXTEND jobs specifically: broad empty bands of solid cream, beige, off-white, or flat "paper" directly beside rich decorative edges (sunburst, stripes, frames) that clearly demanded pattern continuation — treat as a defect (shouldRegenerate true) and name which margin needs continued ornament.
-For PRINT RECOMPOSITION / LAYOUT-ONLY intents (when INTENT forbids new content): shouldRegenerate true if OUTPUT adds logos, icons, mascots, clipart, QR codes, new photos, new decorative illustrations, or clearly new readable text/slogans not present in REFERENCE. Slight paraphrase or illegible blur alone is not enough — focus on visibly NEW objects or copy.
-Also for recomposition: shouldRegenerate true if OUTPUT is clearly just a uniform global stretch/squash of the whole piece with almost no change in relative positions of major blocks (lazy scale-to-fit) — promptAddendum should demand discrete repositioning and independent per-element scaling, not whole-image stretch.
-Minor style differences or slight softness: shouldRegenerate false.
-
-promptAddendum: concise English instructions for the NEXT image-edit prompt (empty if shouldRegenerate is false). Max 900 characters. Be specific (e.g. "continue red-blue radial rays into top margin; do not use solid red fill").`;
+  const instruction = buildImageCritiqueInstruction(intentSummary);
 
   try {
+    const visionModel = resolveOpenAIVisionModel();
     const completion = await client.chat.completions.create({
-      model: resolveOpenAIVisionModel(),
+      model: visionModel,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -136,16 +240,8 @@ promptAddendum: concise English instructions for the NEXT image-edit prompt (emp
       ],
       max_tokens: 900,
     });
-    const text = completion.choices[0]?.message?.content;
-    if (!text) {
-      return { shouldRegenerate: false, issues: [], promptAddendum: "" };
-    }
-    const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, "").trim());
-    return {
-      shouldRegenerate: !!parsed.shouldRegenerate,
-      issues: Array.isArray(parsed.issues) ? parsed.issues.map(String) : [],
-      promptAddendum: typeof parsed.promptAddendum === "string" ? parsed.promptAddendum : "",
-    };
+    usageFromReporter(reporter)?.recordOpenAIChat(visionModel, "chat.completions (QA imagine)", completion.usage);
+    return parseImageCritiqueJson(completion.choices[0]?.message?.content);
   } catch (e) {
     console.warn("critiqueGeneratedImage failed, skipping retry:", e);
     return { shouldRegenerate: false, issues: [], promptAddendum: "" };
@@ -159,22 +255,43 @@ async function imageEditFromDataUrlWithQualityLoop(
   heightMmHint: number,
   critique: CritiqueContext,
   reporter?: ProcessingStageReporter,
+  targetDpi?: number,
 ): Promise<string | null> {
-  const maxPasses = resolveOpenAIImageMaxPasses();
-  const useCritique = resolveOpenAIImageCritiqueEnabled();
-  const model = resolveOpenAIImageModel();
+  const maxPasses = resolveImageMaxPasses();
+  const useCritique = resolveImageCritiqueEnabled();
+  const model = resolveOpenAIImageModelForEdit();
+  const profile = resolvePrintGenerationProfile(targetDpi);
+  const profileHint = formatGenerationProfileHint(profile);
   let prompt = basePrompt;
   let last: string | null = null;
 
+  reporter?.stage(`OpenAI: ${profileHint}…`);
+
   for (let pass = 0; pass < maxPasses; pass++) {
-    reporter?.progressStep?.(pass, maxPasses, `OpenAI (${model}): generare ${pass + 1}/${maxPasses}…`);
-    const out = await imageEditSingle(
-      editSourceDataUrl,
-      prompt,
-      widthMmHint,
-      heightMmHint
+    reporter?.progressStep?.(
+      pass,
+      maxPasses,
+      `OpenAI (${model}, ${profileHint}): generare ${pass + 1}/${maxPasses}…`,
     );
-    if (!out) return last;
+    let out: string | null;
+    try {
+      out = await imageEditSingle(
+        editSourceDataUrl,
+        prompt,
+        widthMmHint,
+        heightMmHint,
+        reporter,
+        targetDpi,
+      );
+    } catch (e) {
+      if (pass === 0) throw e;
+      aiError("openai imageEdit retry failed", e);
+      break;
+    }
+    if (!out) {
+      if (pass === 0) throw new Error("OpenAI: răspuns gol de la images.edit (fără imagine).");
+      break;
+    }
     last = out;
 
     if (!useCritique || pass >= maxPasses - 1) break;
@@ -183,7 +300,8 @@ async function imageEditFromDataUrlWithQualityLoop(
     const c = await critiqueGeneratedImage(
       out,
       critique.intentSummary,
-      critique.referenceForCritique
+      critique.referenceForCritique,
+      reporter,
     );
     if (!c.shouldRegenerate || !String(c.promptAddendum || "").trim()) {
       reporter?.stage("OpenAI: verificare OK, nu e nevoie de regenerare.");
@@ -191,11 +309,7 @@ async function imageEditFromDataUrlWithQualityLoop(
     }
 
     reporter?.stage(`OpenAI: regenerare cu corecții (${pass + 2}/${maxPasses})…`);
-    const issueBlock =
-      c.issues.length > 0
-        ? c.issues.map((x, i) => `${i + 1}. ${x}`).join("\n")
-        : "(see corrections below)";
-    prompt = `${basePrompt}\n\n--- QA refinement (attempt ${pass + 2} of ${maxPasses}) ---\nObserved issues:\n${issueBlock}\n\nApply these corrections in the next render:\n${c.promptAddendum}`;
+    prompt = appendCritiqueToPrompt(basePrompt, pass, maxPasses, c.issues, c.promptAddendum);
   }
   if (last) reporter?.stage("OpenAI: imagine finalizată.");
   return last;
@@ -321,40 +435,40 @@ export async function generateSpeech(text: string): Promise<string | null> {
 
 export async function upscaleImage(
   imageData: string,
-  targetW: number,
-  targetH: number,
+  netW: number,
+  netH: number,
   formatName: string,
-  bleedMm: number,
   mode: UpscaleMode = "extend",
   reporter?: ProcessingStageReporter,
+  targetDpi?: number,
+  safeMarginMm = 0,
 ) {
+  aiLog("openai upscale start", { mode, netW, netH, targetDpi, safeMarginMm });
+  const prepared = await prepareImageForAiUpscale(imageData);
+  let editSource = prepared;
+  let prompt: string;
+
   if (mode === "extend") {
-    const { width: cw, height: ch } = pickCanvasSizeForMmAspect(targetW, targetH);
-    reporter?.stage(`OpenAI: compun canvas extend (${cw}×${ch}px)…`);
-    const composite = await composeExtendCenterContain(imageData, cw, ch);
-    const prompt = buildUpscaleExtendOutpaintPrompt({
-      formatName,
-      targetW,
-      targetH,
-      bleedMm,
-    });
-    return imageEditFromDataUrlWithQualityLoop(composite, prompt, targetW, targetH, {
-      intentSummary: prompt,
-      referenceForCritique: composite,
-    }, reporter);
+    const { width: cw, height: ch } = pickCanvasSizeForMmAspect(netW, netH, targetDpi);
+    reporter?.stage(`OpenAI: canvas extend net (${cw}×${ch}px)…`);
+    editSource = await composeExtendCenterContain(prepared, cw, ch);
+    prompt = buildUpscaleExtendOutpaintPrompt({ formatName, netW, netH, safeMarginMm });
+  } else {
+    reporter?.stage("OpenAI: pregătesc upscale recompose…");
+    prompt = buildUpscaleRecomposePrompt({ formatName, netW, netH, safeMarginMm });
   }
 
-  reporter?.stage("OpenAI: pregătesc upscale recompose…");
-  const prompt = buildUpscaleRecomposePrompt({
-    formatName,
-    targetW,
-    targetH,
-    bleedMm,
-  });
-  return imageEditFromDataUrlWithQualityLoop(imageData, prompt, targetW, targetH, {
-    intentSummary: prompt,
-    referenceForCritique: imageData,
-  }, reporter);
+  const url = await imageEditFromDataUrlWithQualityLoop(
+    editSource,
+    prompt,
+    netW,
+    netH,
+    { intentSummary: prompt, referenceForCritique: editSource },
+    reporter,
+    targetDpi,
+  );
+  aiLog("openai upscale done", { hasUrl: Boolean(url) });
+  return url;
 }
 
 export async function generativeFill(

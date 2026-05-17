@@ -12,25 +12,39 @@ export type AiModelOption = {
 
 export const GEMINI_IMAGE_MODELS: AiModelOption[] = [
   {
-    id: "gemini-3-pro-image-preview",
-    label: "Nano Banana Pro",
-    description: "Calitate maximă, 2K — upscale, bleed, mockup.",
-    tier: "high",
-    costHint: "Scump · ~$0.12–0.24 / imagine 2K",
+    id: "imagen-4.0-fast-generate-001",
+    label: "Imagen 4 Fast",
+    description: "Cel mai ieftin (~$0.02/img). Generare din prompt; sursa e descrisă automat.",
+    tier: "low",
+    costHint: "Ieftin · ~$0.02 / imagine 1024px",
   },
   {
-    id: "gemini-3.1-flash-image-preview",
-    label: "Nano Banana 2",
-    description: "Echilibru viteză/calitate; adesea mai permisiv la cotă.",
+    id: "imagen-4.0-generate-001",
+    label: "Imagen 4 Standard",
+    description: "Calitate producție (~$0.04/img). 1K/2K după DPI; fără edit direct pe pixeli.",
     tier: "medium",
-    costHint: "Mediu · ~$0.04–0.10 / imagine",
+    costHint: "Mediu · ~$0.04 / imagine",
   },
   {
     id: "gemini-2.5-flash-image",
     label: "Nano Banana (2.5 Flash)",
-    description: "Rapid și economic; bun pentru teste.",
+    description: "Edit cu imagine sursă — rapid, economic, păstrează designul.",
     tier: "low",
     costHint: "Ieftin · ~$0.02–0.05 / imagine",
+  },
+  {
+    id: "gemini-3.1-flash-image-preview",
+    label: "Nano Banana 2",
+    description: "Echilibru viteză/calitate; edit pe sursă.",
+    tier: "medium",
+    costHint: "Mediu · ~$0.04–0.10 / imagine",
+  },
+  {
+    id: "gemini-3-pro-image-preview",
+    label: "Nano Banana Pro",
+    description: "Calitate maximă, 2K — edit pe sursă, recomandat pentru tipar fin.",
+    tier: "high",
+    costHint: "Scump · ~$0.12–0.24 / imagine 2K",
   },
 ];
 
@@ -62,9 +76,23 @@ export const OPENAI_IMAGE_MODELS: AiModelOption[] = [
   {
     id: "gpt-image-2",
     label: "GPT Image 2",
-    description: "Recomandat — upscale, bleed, mockup (images.edit).",
+    description: "Recomandat — upscale, bleed, mockup (images.edit, păstrează sursa).",
     tier: "medium",
     costHint: "Mediu–scump · ~$0.06–0.16 / imagine (high)",
+  },
+  {
+    id: "dall-e-2",
+    label: "DALL-E 2",
+    description: "Economic — images.edit cu imagine sursă (max 1024px).",
+    tier: "low",
+    costHint: "Ieftin · ~$0.02 / imagine 1024px",
+  },
+  {
+    id: "dall-e-3",
+    label: "DALL-E 3",
+    description: "Generare HD din prompt (fără edit pe sursă). Slab la upscale.",
+    tier: "medium",
+    costHint: "Mediu · ~$0.04 standard, ~$0.08 HD / imagine",
   },
   {
     id: "gpt-image-1",

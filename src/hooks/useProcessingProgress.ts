@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProcessingStageReporter } from "../lib/processingStage";
+import { AiUsageAccumulator, type AiUsageSummary } from "../lib/aiUsage";
 
 export function useProcessingProgress() {
   const [isActive, setIsActive] = useState(false);
-  /** null = bară indeterminată; 0–100 = pași reali */
   const [progress, setProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [log, setLog] = useState<string[]>([]);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const startMsRef = useRef(0);
   const elapsedTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const usageRef = useRef<AiUsageAccumulator | null>(null);
 
   const clearElapsedTick = useCallback(() => {
     if (elapsedTickRef.current) {
@@ -34,10 +36,12 @@ export function useProcessingProgress() {
     (initialMessage: string) => {
       clearElapsedTick();
       startMsRef.current = Date.now();
+      usageRef.current = new AiUsageAccumulator();
       setIsActive(true);
       setProgress(null);
       setElapsedSec(0);
       setLog([]);
+      setErrorMessage(null);
       pushLog(initialMessage);
 
       elapsedTickRef.current = setInterval(() => {
@@ -64,10 +68,18 @@ export function useProcessingProgress() {
     [pushLog],
   );
 
-  const reporterRef = useRef<ProcessingStageReporter>({ stage, progressStep });
-  reporterRef.current = { stage, progressStep };
+  const getReporter = useCallback((): ProcessingStageReporter => {
+    return {
+      stage,
+      progressStep,
+      usage: usageRef.current ?? undefined,
+    };
+  }, [stage, progressStep]);
 
-  const getReporter = useCallback((): ProcessingStageReporter => reporterRef.current, []);
+  const getUsageSummary = useCallback((): AiUsageSummary | null => {
+    const summary = usageRef.current?.summarize();
+    return summary && summary.callCount > 0 ? summary : null;
+  }, []);
 
   const done = useCallback(() => {
     clearElapsedTick();
@@ -85,6 +97,28 @@ export function useProcessingProgress() {
     setIsActive(false);
     setProgress(null);
     setElapsedSec(0);
+    setErrorMessage(null);
+  }, [clearElapsedTick]);
+
+  const fail = useCallback(
+    (errorText: string) => {
+      clearElapsedTick();
+      const text = errorText.trim() || "Eroare la procesarea AI.";
+      setErrorMessage(text);
+      setMessage(text);
+      setIsActive(true);
+      setProgress(null);
+      pushLog(`Eroare: ${text}`);
+    },
+    [clearElapsedTick, pushLog],
+  );
+
+  const dismissError = useCallback(() => {
+    clearElapsedTick();
+    setErrorMessage(null);
+    setIsActive(false);
+    setProgress(null);
+    setElapsedSec(0);
   }, [clearElapsedTick]);
 
   useEffect(() => () => clearElapsedTick(), [clearElapsedTick]);
@@ -95,11 +129,15 @@ export function useProcessingProgress() {
     message,
     log,
     elapsedSec,
+    errorMessage,
     begin,
     stage,
     progressStep,
     getReporter,
+    getUsageSummary,
     done,
     stop,
+    fail,
+    dismissError,
   };
 }

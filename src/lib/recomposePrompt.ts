@@ -1,32 +1,30 @@
-/**
- * Prompt pentru modul „recompose”: reconstrucție de layout din piese existente
- * (mutare, reordonare, scale per-element) — fără conținut nou; evită stretch global leneș.
- */
+import { buildSafeZoneInstruction } from "./printSafeZonePrompt";
+
 export function buildUpscaleRecomposePrompt(opts: {
   formatName: string;
-  targetW: number;
-  targetH: number;
-  bleedMm: number;
+  netW: number;
+  netH: number;
+  safeMarginMm: number;
 }): string {
-  const { formatName, targetW, targetH, bleedMm } = opts;
-  return `PRINT RECOMPOSITION — REAL LAYOUT REBUILD (not a global stretch).
+  const { formatName, netW, netH, safeMarginMm } = opts;
+  const safe = buildSafeZoneInstruction(safeMarginMm, netW, netH);
 
-Target: ${formatName}, total ~${targetW}×${targetH} mm including ~${bleedMm} mm bleed per side.
+  return `PRINT IMAGE RECREATION — GENERATE A COMPLETE NEW LAYOUT (not a lazy stretch).
 
-PRIMARY TASK — DO THIS, NOT STRETCH:
-Treat the source as a set of SEPARATE visual pieces (background bands, frames, logos, type blocks, icons, photos, ornaments). You MUST actively RE-POSITION and RE-ORDER them on the new canvas so the composition fits the target aspect ratio. You may place pieces in ANY spatial order you want (top/bottom/left/right/center, stacked, split columns, hero + footer band, etc.). Each piece may be scaled, rotated, or cropped INDEPENDENTLY — non-uniform layout is encouraged. Per-element scale may differ strongly from neighbor elements.
+You must RECREATE the full print artwork for trim ${netW}×${netH} mm (${formatName}). Output = one cohesive, print-ready image filling the frame edge-to-edge. Bleed is added separately after you finish — do NOT paint bleed bands.
+${safe}
 
-FORBIDDEN AS THE MAIN SOLUTION:
-- Do NOT solve the new aspect ratio mainly by one uniform scale or squash of the entire artwork (whole-image stretch). That is a failed recomposition. If you only stretch globally, the job is wrong.
+PRIMARY TASK:
+Treat the reference as separate visual pieces (background, frames, logos, type, icons, photos). RE-POSITION and RE-ORDER them so the composition fits ${netW}×${netH} mm. Each piece may be scaled, rotated, or cropped independently.
 
-ALLOWED TRANSFORMS ON EXISTING CONTENT ONLY:
-- Move, overlap, reorder layers, change gaps, rotate, crop to frame, scale each motif or text block separately, break one text block into multiple lines using the SAME words/letters already in the source.
-- You may warp or perspective-correct existing regions if it helps integration, as long as every visible graphic or letterform is traceable to the source (no new drawings or new words).
+FORBIDDEN:
+- Solving the new ratio only by stretching the entire source.
+- Adding new logos, text, clipart, or imagery not present in the reference.
+- Placing critical content inside the safe-zone margins defined above.
 
-ABSOLUTE CONSTRAINT — NO NEW CONTENT:
-1) Do NOT add logos, icons, mascots, clipart, photos, QR codes, watermarks, badges, ornaments, illustrations, or shapes that do not already appear in the reference.
-2) Do NOT invent new readable text, slogans, addresses, or dates. Only rearrange or restyle text that already exists in the source; do not substitute new copy.
-3) Empty areas after rearrangement: fill with minimal bleed from existing nearby colors/patterns only — no new pictorial scenes.
+ALLOWED:
+- Move, overlap, reorder, crop, per-element scale, line breaks using existing words only.
+- Fill empty areas with colors/patterns already visible in the source.
 
-The result must still read as the SAME brand/design, but physically re-laid out — not a stretched photocopy.`;
+Deliver a fully recreated professional print design respecting safe zone percentages.`;
 }

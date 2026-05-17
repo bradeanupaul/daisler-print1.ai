@@ -253,3 +253,10 @@ export function groupKindLabel(kind: FileHistoryGroup["kind"]): string {
   const labels = { session: "Lucrare", project: "Proiect", exports: "Exporturi" };
   return labels[kind] ?? kind;
 }
+
+/** Surse pentru care salvăm / afișăm consum AI în istoric. */
+export const AI_GENERATED_SOURCE_KINDS: FileSourceKind[] = [
+  "upscale",
+  "generative_fill",
+  "mockup",
+];

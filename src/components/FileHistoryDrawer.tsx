@@ -3,7 +3,8 @@ import { motion } from "motion/react";
 import { ChevronDown, ExternalLink, Loader2, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import { isSupabaseConfigured } from "../lib/supabase/client";
-import { groupKindLabel, sourceKindLabel } from "../services/fileHistory";
+import { AI_GENERATED_SOURCE_KINDS, groupKindLabel, sourceKindLabel } from "../services/fileHistory";
+import { AiUsageHistoryBadge } from "./AiUsageHistoryBadge";
 import type { FileHistoryAsset, FileHistoryGroup, HistoryItem } from "../types";
 
 type FileHistoryDrawerProps = {
@@ -92,7 +93,7 @@ export function FileHistoryDrawer({
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                  className="overflow-hidden rounded-xl border border-[#2d333b] bg-[#1a1d23]"
+                  className="rounded-xl border border-[#2d333b] bg-[#1a1d23]"
                 >
                   <button
                     type="button"
@@ -127,16 +128,23 @@ export function FileHistoryDrawer({
                         .map((asset) => {
                         const isLoading = loadingAssetId === asset.id;
                         const isSelected = selectedAssetId === asset.id;
+                        const isAiGenerated = AI_GENERATED_SOURCE_KINDS.includes(asset.source_kind);
                         return (
                           <li key={asset.id}>
                             <div
                               className={cn(
-                                "flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-[10px] transition-colors",
+                                "relative flex items-center justify-between gap-2 rounded-lg py-1.5 pl-7 pr-2 text-[10px] transition-colors",
                                 isSelected
                                   ? "bg-amber-500/10 ring-1 ring-amber-500/30"
                                   : "hover:bg-white/5",
                               )}
                             >
+                              {isAiGenerated && (
+                                <AiUsageHistoryBadge
+                                  metadata={asset.metadata}
+                                  className="absolute left-1 top-1 z-20"
+                                />
+                              )}
                               <button
                                 type="button"
                                 disabled={!onSelectAsset || isLoading}

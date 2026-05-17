@@ -20,6 +20,7 @@ import {
   onSnapshot,
   serverTimestamp,
 } from "firebase/firestore";
+import { Toaster } from "sonner";
 import { LoginPage } from "./components/LoginPage";
 import { PrintWorkspace } from "./features/print-workspace/PrintWorkspace";
 import { fetchGroupedFileHistory } from "./services/fileHistory";
@@ -27,6 +28,10 @@ import { isSupabaseConfigured } from "./lib/supabase/client";
 import type { FileHistoryGroup, HistoryItem } from "./types";
 
 export default function App() {
+  const toaster = (
+    <Toaster position="top-right" theme="dark" richColors closeButton duration={8000} />
+  );
+
   useEffect(() => {
     if (pdfjs.version) {
       pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -114,20 +119,26 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-        <LoginPage />
-      </div>
+      <>
+        {toaster}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          <LoginPage />
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="flex h-dvh min-h-0 w-full flex-1 flex-col overflow-hidden">
-      <PrintWorkspace
-        user={user}
-        history={history}
-        groupedHistory={groupedHistory}
-        onHistoryRefresh={() => void refreshGroupedHistory(user.uid)}
-      />
-    </div>
+    <>
+      {toaster}
+      <div className="flex h-dvh min-h-0 w-full flex-1 flex-col overflow-hidden">
+        <PrintWorkspace
+          user={user}
+          history={history}
+          groupedHistory={groupedHistory}
+          onHistoryRefresh={() => void refreshGroupedHistory(user.uid)}
+        />
+      </div>
+    </>
   );
 }

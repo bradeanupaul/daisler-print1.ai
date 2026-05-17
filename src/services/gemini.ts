@@ -6,15 +6,26 @@ import {
   hasOpenAIKeyConfigured,
 } from "../lib/aiKeys";
 import { loadAiAppSettings } from "../lib/aiAppSettings";
+import { aiError, aiLog } from "../lib/aiUpscaleLog";
 import { buildUpscaleExtendOutpaintPrompt } from "../lib/extendOutpaintPrompt";
 import { buildUpscaleRecomposePrompt } from "../lib/recomposePrompt";
-import { resolveGeminiImageModel } from "../lib/geminiImageConfig";
+import {
+  resolveGeminiImageModel,
+  resolveGeminiImageModelForEdit,
+} from "../lib/geminiImageConfig";
 import { resolveGeminiTextModel } from "../lib/geminiTextConfig";
+import { resolvePrintGenerationProfile } from "../lib/printGenerationProfile";
 import type { ProcessingStageReporter } from "../lib/processingStage";
-import { resolveImageForGemini, ensureImageDataUrl } from "../lib/imageDataUrl";
+import { prefixProcessingReporter } from "../lib/processingStage";
+import {
+  resolveImageForGemini,
+  ensureImageDataUrl,
+  prepareImageForAiUpscale,
+} from "../lib/imageDataUrl";
 import { composeExtendCenterContain, pickCanvasSizeForMmAspect } from "../lib/upscaleCompose";
 import type { UpscaleMode } from "../types";
 import * as openaiPrint from "./openaiPrint";
+import { geminiImageWithQualityLoop } from "./geminiImageQuality";
 
 const getAI = () => {
   const apiKey = resolveGeminiApiKey();
@@ -249,119 +260,165 @@ async function runDebugDualImageCompare(
 
 async function upscaleImageGemini(
   imageData: string,
-  targetW: number,
-  targetH: number,
+  netW: number,
+  netH: number,
   formatName: string,
-  bleedMm: number,
   mode: UpscaleMode = "extend",
   reporter?: ProcessingStageReporter,
+  targetDpi?: number,
+  safeMarginMm = 0,
 ): Promise<string | null> {
-  const ai = getAI();
-  const model = resolveGeminiImageModel();
-  const aspectRatio = getClosestAspectRatio(targetW, targetH, model);
+  const profile = resolvePrintGenerationProfile(targetDpi);
+  const aspectRatio = getClosestAspectRatio(netW, netH, resolveGeminiImageModelForEdit());
+  const model = resolveGeminiImageModelForEdit();
 
-  const originalW = targetW - bleedMm * 2;
-  const originalH = targetH - bleedMm * 2;
+  aiLog("gemini upscale start", { model, mode, netW, netH, targetDpi, safeMarginMm });
 
-  reporter?.stage("Gemini: pregătesc imaginea pentru API…");
-  let inputDataUrl = await ensureImageDataUrl(imageData);
+  reporter?.stage("Gemini: pregătesc imaginea pentru recreare AI…");
+  let inputDataUrl = await prepareImageForAiUpscale(imageData);
   let prompt: string;
 
   if (mode === "extend") {
-    const { width: cw, height: ch } = pickCanvasSizeForMmAspect(targetW, targetH);
-    reporter?.stage(`Gemini: compun canvas extend (${cw}×${ch}px)…`);
+    const { width: cw, height: ch } = pickCanvasSizeForMmAspect(netW, netH, targetDpi);
+    reporter?.stage(`Gemini: canvas extend net (${cw}×${ch}px)…`);
     inputDataUrl = await composeExtendCenterContain(inputDataUrl, cw, ch);
-    prompt = buildUpscaleExtendOutpaintPrompt({
-      formatName,
-      targetW,
-      targetH,
-      bleedMm,
-    });
+    prompt = buildUpscaleExtendOutpaintPrompt({ formatName, netW, netH, safeMarginMm });
   } else {
-    prompt = `${buildUpscaleRecomposePrompt({
-      formatName,
-      targetW,
-      targetH,
-      bleedMm,
-    })}
-
-Net trim (after bleed): ~${originalW}×${originalH} mm.`;
+    prompt = buildUpscaleRecomposePrompt({ formatName, netW, netH, safeMarginMm });
   }
 
   try {
-    reporter?.stage(`Gemini: trimit cerere (${model}, 2K)…`);
-    const imagePart = await geminiInlineImage(inputDataUrl);
-    const response = await ai.models.generateContent({
-      model,
-      contents: [
-        {
-          parts: [{ text: prompt }, imagePart],
-        },
-      ],
-      config: {
-        imageConfig: {
-          aspectRatio,
-          imageSize: "2K",
-        },
-      },
+    const url = await geminiImageWithQualityLoop({
+      editSourceDataUrl: inputDataUrl,
+      basePrompt: prompt,
+      imageConfig: { aspectRatio, imageSize: profile.geminiImageSize },
+      critique: { intentSummary: prompt, referenceForCritique: inputDataUrl },
+      reporter,
+      targetDpi,
     });
-
-    reporter?.stage("Gemini: primesc răspunsul…");
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        reporter?.stage("Gemini: imagine generată.");
-        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
-      }
-    }
-    return null;
+    aiLog("gemini upscale done", { hasUrl: Boolean(url) });
+    return url;
   } catch (error) {
-    console.error("AI Upscale failed (Gemini):", error);
+    aiError("gemini upscale failed", error);
     throw error;
   }
 }
 
-/** Upscale / recompose / extend: cu mod debug + ambele chei → Gemini și OpenAI în paralele; altfel ruta unică (preferOpenAI). */
+/** Upscale: furnizor principal din Setări AI, fallback la celălalt; opțional comparare duală. */
 export async function upscaleImage(
   imageData: string,
-  targetW: number,
-  targetH: number,
+  netW: number,
+  netH: number,
   formatName: string,
-  bleedMm: number,
   mode: UpscaleMode = "extend",
   reporter?: ProcessingStageReporter,
+  targetDpi?: number,
+  safeMarginMm = 0,
 ): Promise<UpscaleGenerationResult> {
   const app = loadAiAppSettings();
   const gOk = hasGeminiKeyConfigured();
   const oOk = hasOpenAIKeyConfigured();
 
+  aiLog("upscaleImage route", {
+    primary: app.primaryImageProvider,
+    debugDual: app.debugCompareImageModels,
+    gOk,
+    oOk,
+    mode,
+    netW,
+    netH,
+    targetDpi,
+    safeMarginMm,
+  });
+
+  if (!gOk && !oOk) {
+    throw new Error("Nu există cheie API. Adaugă Gemini sau OpenAI în setări.");
+  }
+
   if (app.debugCompareImageModels && gOk && oOk) {
-    reporter?.stage("Generez în paralel: Gemini + OpenAI…");
+    reporter?.stage("Generez în paralel: Gemini + OpenAI (ambele rulează)…");
+    const geminiReporter = prefixProcessingReporter(reporter, "Gemini");
+    const openaiReporter = prefixProcessingReporter(reporter, "OpenAI");
     const { gemini, openai } = await runDebugDualImageCompare(
-      upscaleImageGemini(imageData, targetW, targetH, formatName, bleedMm, mode, {
-        stage: (m) => reporter?.stage(m),
-      }),
-      openaiPrint.upscaleImage(imageData, targetW, targetH, formatName, bleedMm, mode, reporter),
+      upscaleImageGemini(
+        imageData,
+        netW,
+        netH,
+        formatName,
+        mode,
+        geminiReporter,
+        targetDpi,
+        safeMarginMm,
+      ),
+      openaiPrint.upscaleImage(
+        imageData,
+        netW,
+        netH,
+        formatName,
+        mode,
+        openaiReporter,
+        targetDpi,
+        safeMarginMm,
+      ),
     );
+    aiLog("dual compare result", {
+      geminiOk: Boolean(gemini.imageUrl),
+      openaiOk: Boolean(openai.imageUrl),
+      geminiErr: gemini.error,
+      openaiErr: openai.error,
+    });
     return { kind: "dual", gemini, openai };
   }
 
-  if (preferOpenAI()) {
-    const url = await openaiPrint.upscaleImage(
-      imageData,
-      targetW,
-      targetH,
-      formatName,
-      bleedMm,
-      mode,
-      reporter,
-    );
-    if (!url) throw new Error("EMPTY_RESPONSE");
-    return { kind: "single", imageUrl: url, provider: "openai" };
+  const tryOrder: Array<"gemini" | "openai"> =
+    app.primaryImageProvider === "openai" ? ["openai", "gemini"] : ["gemini", "openai"];
+
+  let lastErr: unknown;
+  for (const provider of tryOrder) {
+    if (provider === "gemini" && !gOk) continue;
+    if (provider === "openai" && !oOk) continue;
+    const label = provider === "gemini" ? "Gemini" : "OpenAI";
+    let url: string | null = null;
+    try {
+      aiLog(`trying ${label}`);
+      url =
+        provider === "gemini"
+          ? await upscaleImageGemini(
+              imageData,
+              netW,
+              netH,
+              formatName,
+              mode,
+              reporter,
+              targetDpi,
+              safeMarginMm,
+            )
+          : await openaiPrint.upscaleImage(
+              imageData,
+              netW,
+              netH,
+              formatName,
+              mode,
+              reporter,
+              targetDpi,
+              safeMarginMm,
+            );
+    } catch (e) {
+      lastErr = e;
+      aiError(`${label} failed`, e);
+      reporter?.stage(`${label} eșuat — încerc alt furnizor…`);
+      continue;
+    }
+    if (url) {
+      aiLog(`${label} success`);
+      return { kind: "single", imageUrl: url, provider };
+    }
+    lastErr = new Error(`${label}: API fără imagine în răspuns`);
+    reporter?.stage(`${label}: răspuns gol — încerc alt furnizor…`);
   }
 
-  const url = await upscaleImageGemini(imageData, targetW, targetH, formatName, bleedMm, mode, reporter);
-  if (!url) throw new Error("EMPTY_RESPONSE");
-  return { kind: "single", imageUrl: url, provider: "gemini" };
+  if (lastErr instanceof Error) throw lastErr;
+  throw new Error("Nu s-a generat nicio imagine. Verifică cotă/cheie API în Setări AI.");
 }
 
 async function generativeFillGemini(
@@ -431,66 +488,52 @@ export async function generativeFill(
 
   if (app.debugCompareImageModels && gOk && oOk) {
     reporter?.stage("Generez bleed în paralel: Gemini + OpenAI…");
+    const geminiReporter = prefixProcessingReporter(reporter, "Gemini");
+    const openaiReporter = prefixProcessingReporter(reporter, "OpenAI");
     const { gemini, openai } = await runDebugDualImageCompare(
-      generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, {
-        stage: (m) => reporter?.stage(m),
-      }),
-      openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter),
+      generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, geminiReporter),
+      openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, openaiReporter),
     );
     return { kind: "dual", gemini, openai };
   }
 
-  if (preferOpenAI()) {
-    const url = await openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter);
-    if (!url) throw new Error("EMPTY_RESPONSE");
-    return { kind: "single", imageUrl: url, provider: "openai" };
-  }
+  const tryOrder: Array<"gemini" | "openai"> =
+    app.primaryImageProvider === "openai" ? ["openai", "gemini"] : ["gemini", "openai"];
 
-  const url = await generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter);
-  if (!url) throw new Error("EMPTY_RESPONSE");
-  return { kind: "single", imageUrl: url, provider: "gemini" };
+  for (const provider of tryOrder) {
+    if (provider === "gemini" && !gOk) continue;
+    if (provider === "openai" && !oOk) continue;
+    const url =
+      provider === "gemini"
+        ? await generativeFillGemini(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter)
+        : await openaiPrint.generativeFill(imageData, bleedMm, targetWidthMm, targetHeightMm, reporter);
+    if (url) return { kind: "single", imageUrl: url, provider };
+  }
+  throw new Error("EMPTY_RESPONSE");
 }
 
 /** Rafinare pe o singură imagine (ex. din dialogul de comparare). Un apel Gemini. */
 export async function refineGeminiImageFromPrompt(
   imageDataUrl: string,
-  userInstruction: string
+  userInstruction: string,
+  reporter?: ProcessingStageReporter,
+  targetDpi?: number,
 ): Promise<string | null> {
-  const ai = getAI();
-  const model = resolveGeminiImageModel();
-  const aspectRatio = getClosestAspectRatio(210, 297, model);
   const prompt = `Edit this image for professional print output. Apply ONLY what the user asks. Keep composition coherent unless they request layout changes. No watermarks.
 
 User instruction:
 ${userInstruction}`;
-
-  try {
-    const imagePart = await geminiInlineImage(imageDataUrl);
-    const response = await ai.models.generateContent({
-      model,
-      contents: [
-        {
-          parts: [{ text: prompt }, imagePart],
-        },
-      ],
-      config: {
-        imageConfig: {
-          aspectRatio,
-          imageSize: "2K",
-        },
-      },
-    });
-
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
-      }
-    }
-    return null;
-  } catch (error) {
-    console.error("refineGeminiImageFromPrompt failed:", error);
-    throw error;
-  }
+  const input = await prepareImageForAiUpscale(imageDataUrl);
+  const profile = resolvePrintGenerationProfile(targetDpi);
+  const aspectRatio = getClosestAspectRatio(210, 297, resolveGeminiImageModelForEdit());
+  return geminiImageWithQualityLoop({
+    editSourceDataUrl: input,
+    basePrompt: prompt,
+    imageConfig: { aspectRatio, imageSize: profile.geminiImageSize },
+    critique: { intentSummary: prompt, referenceForCritique: input },
+    reporter,
+    targetDpi,
+  });
 }
 
 export type MockupImageProvider = "gemini" | "openai";

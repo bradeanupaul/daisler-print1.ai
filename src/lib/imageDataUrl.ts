@@ -45,6 +45,57 @@ export async function ensureImageDataUrl(url: string): Promise<string> {
   return `data:${mime};base64,${base64}`;
 }
 
+const AI_MIN_LONG_EDGE = 512;
+const AI_MAX_LONG_EDGE = 2048;
+
+/** Pregătește sursa pentru edit/upscale: data URL valid, min 512px pe latura lungă. */
+export async function prepareImageForAiUpscale(url: string): Promise<string> {
+  const dataUrl = await ensureImageDataUrl(url);
+
+  if (typeof document === "undefined") {
+    return dataUrl;
+  }
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const nw = img.naturalWidth || img.width;
+      const nh = img.naturalHeight || img.height;
+      if (!nw || !nh) {
+        reject(new Error("Dimensiuni imagine invalide pentru AI."));
+        return;
+      }
+      const long = Math.max(nw, nh);
+      let scale = 1;
+      if (long < AI_MIN_LONG_EDGE) scale = AI_MIN_LONG_EDGE / long;
+      else if (long > AI_MAX_LONG_EDGE) scale = AI_MAX_LONG_EDGE / long;
+
+      const w = Math.max(1, Math.round(nw * scale));
+      const h = Math.max(1, Math.round(nh * scale));
+      if (Math.abs(scale - 1) < 0.001) {
+        resolve(dataUrl);
+        return;
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas 2D indisponibil."));
+        return;
+      }
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () =>
+      reject(new Error("Nu s-a putut încărca imaginea pentru recreare AI."));
+    img.src = dataUrl;
+  });
+}
+
 /** Payload pentru Gemini `inlineData` — evită MIME greșit (ex. `http` din blob:). */
 export async function resolveImageForGemini(
   url: string,

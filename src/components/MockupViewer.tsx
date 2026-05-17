@@ -164,9 +164,17 @@ interface MockupViewerProps {
   initialType: MockupType;
   hasKey: boolean;
   handleSelectKey: () => void;
+  targetDpi?: number;
 }
 
-export function MockupViewer({ designImage, onClose, initialType, hasKey, handleSelectKey }: MockupViewerProps) {
+export function MockupViewer({
+  designImage,
+  onClose,
+  initialType,
+  hasKey,
+  handleSelectKey,
+  targetDpi = 300,
+}: MockupViewerProps) {
   const [type, setType] = useState<MockupType>(initialType);
   const [zone, setZone] = useState<'front' | 'back' | 'shoulder_left' | 'shoulder_right'>('front');
   const [viewMode, setViewMode] = useState<'3d' | 'ai'>('3d');
@@ -186,7 +194,9 @@ export function MockupViewer({ designImage, onClose, initialType, hasKey, handle
       const result = await generateCustomMockup(
         prompt || `A professional studio mockup of a ${type} with this design`,
         designImage,
-        localStorage.getItem('gemini_api_key') || undefined
+        localStorage.getItem('gemini_api_key') || undefined,
+        undefined,
+        targetDpi,
       );
 
       if (result.kind === 'dual') {
@@ -491,8 +501,8 @@ export function MockupViewer({ designImage, onClose, initialType, hasKey, handle
           openai={dualPicker.openai}
           onPickGemini={finalizeDualPickGemini}
           onPickOpenai={finalizeDualPickOpenai}
-          refineWithGemini={(u, p) => refineGeminiImageFromPrompt(u, p)}
-          refineWithOpenai={(u, p) => openaiPrint.quickImageEditFromPrompt(u, p)}
+          refineWithGemini={(u, p) => refineGeminiImageFromPrompt(u, p, undefined, targetDpi)}
+          refineWithOpenai={(u, p) => openaiPrint.quickImageEditFromPrompt(u, p, 1, 1, undefined, targetDpi)}
           zIndexClass="z-[200]"
         />
       )}

@@ -1,9 +1,9 @@
 import { loadAiAppSettings } from "./aiAppSettings";
 import { OPENAI_IMAGE_MODELS, resolveModelFromCatalog } from "./aiModelCatalog";
+import { resolvePrintGenerationProfile } from "./printGenerationProfile";
 
 const DEFAULT = "gpt-image-2";
 
-/** Model OpenAI pentru images.edit. Setări AI > .env > implicit. */
 export function resolveOpenAIImageModel(): string {
   const app = loadAiAppSettings();
   const fromEnv =
@@ -29,25 +29,54 @@ export function resolveOpenAIImageQuality(): "low" | "medium" | "high" | "auto" 
   return "high";
 }
 
-/** Număr maxim de apeluri images.edit (prima + regenerări). 1–5, implicit 3. */
-export function resolveOpenAIImageMaxPasses(): number {
-  const raw =
+export function resolveOpenAIImageQualityForDpi(
+  targetDpi?: number,
+): "low" | "medium" | "high" | "auto" {
+  const fromEnv =
     (typeof process !== "undefined" &&
-      process.env.OPENAI_IMAGE_MAX_PASSES &&
-      String(process.env.OPENAI_IMAGE_MAX_PASSES).trim()) ||
+      process.env.OPENAI_IMAGE_QUALITY &&
+      String(process.env.OPENAI_IMAGE_QUALITY).trim().toLowerCase()) ||
     "";
-  const n = parseInt(raw, 10);
-  if (Number.isFinite(n) && n >= 1 && n <= 5) return n;
-  return 3;
+  if (fromEnv === "high" || fromEnv === "medium" || fromEnv === "low" || fromEnv === "auto") {
+    return fromEnv;
+  }
+  return resolvePrintGenerationProfile(targetDpi).openaiQuality;
 }
 
-/** După generare: vision QA + retry dacă e nevoie. Dezactivează cu 0 / false. */
-export function resolveOpenAIImageCritiqueEnabled(): boolean {
-  const raw =
-    (typeof process !== "undefined" &&
-      process.env.OPENAI_IMAGE_CRITIQUE &&
-      String(process.env.OPENAI_IMAGE_CRITIQUE).trim().toLowerCase()) ||
-    "";
-  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
-  return true;
+export function isOpenAIGptImageModel(modelId: string): boolean {
+  return modelId.toLowerCase().includes("gpt-image");
 }
+
+export function isOpenAIDalle2Model(modelId: string): boolean {
+  return modelId.toLowerCase() === "dall-e-2";
+}
+
+export function isOpenAIDalle3Model(modelId: string): boolean {
+  return modelId.toLowerCase() === "dall-e-3";
+}
+
+export function isOpenAIDalleModel(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return id === "dall-e-2" || id === "dall-e-3";
+}
+
+export function resolveDalle3QualityForDpi(
+  targetDpi?: number,
+): "standard" | "hd" {
+  return resolvePrintGenerationProfile(targetDpi).targetDpi >= 300 ? "hd" : "standard";
+}
+
+/** images.edit / upscale — DALL-E 3 nu acceptă sursă; folosește GPT Image. */
+export function resolveOpenAIImageModelForEdit(): string {
+  const selected = resolveOpenAIImageModel();
+  if (isOpenAIDalle3Model(selected)) return "gpt-image-2";
+  if (isOpenAIGptImageModel(selected) || isOpenAIDalle2Model(selected)) {
+    return selected;
+  }
+  return "gpt-image-2";
+}
+
+export {
+  resolveImageCritiqueEnabled as resolveOpenAIImageCritiqueEnabled,
+  resolveImageMaxPasses as resolveOpenAIImageMaxPasses,
+} from "./aiImageQualityConfig";

@@ -1,18 +1,22 @@
+import { resolvePrintGenerationProfile } from "./printGenerationProfile";
+
 /**
- * Pregătește layout-ul „extend”: canvas la raportul țintă, imagine sursă întreagă (contain), margini uniforme.
+ * Canvas extend înainte de API — dimensiune după DPI (300 → 1536px lungime).
  */
-export function pickCanvasSizeForMmAspect(mmW: number, mmH: number) {
-  if (mmW <= 0 || mmH <= 0) return { width: 1024, height: 1024 };
+export function pickCanvasSizeForMmAspect(mmW: number, mmH: number, targetDpi?: number) {
+  const long = resolvePrintGenerationProfile(targetDpi).extendCanvasLongEdge;
+  const short = Math.round(long * (1024 / 1536));
+  if (mmW <= 0 || mmH <= 0) return { width: long, height: long };
   const r = mmW / mmH;
-  if (r >= 1.35) return { width: 1536, height: 1024 };
-  if (r <= 0.75) return { width: 1024, height: 1536 };
-  return { width: 1024, height: 1024 };
+  if (r >= 1.35) return { width: long, height: short };
+  if (r <= 0.75) return { width: short, height: long };
+  return { width: short, height: short };
 }
 
 export async function composeExtendCenterContain(
   sourceDataUrl: string,
   canvasW: number,
-  canvasH: number
+  canvasH: number,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();

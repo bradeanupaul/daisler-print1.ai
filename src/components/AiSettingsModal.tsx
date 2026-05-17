@@ -51,11 +51,11 @@ export function AiSettingsModal({
     const s = loadAiAppSettings();
     setPrimary(s.primaryImageProvider);
     setDebugDual(s.debugCompareImageModels);
-    setGeminiImage(resolveGeminiImageModel());
-    setGeminiText(resolveGeminiTextModel());
-    setOpenaiImage(resolveOpenAIImageModel());
-    setOpenaiAgent(resolveOpenAIAgentModel());
-    setOpenaiVision(resolveOpenAIVisionModel());
+    setGeminiImage(s.geminiImageModel ?? resolveGeminiImageModel());
+    setGeminiText(s.geminiTextModel ?? resolveGeminiTextModel());
+    setOpenaiImage(s.openaiImageModel ?? resolveOpenAIImageModel());
+    setOpenaiAgent(s.openaiAgentModel ?? resolveOpenAIAgentModel());
+    setOpenaiVision(s.openaiVisionModel ?? resolveOpenAIVisionModel());
   }, [open]);
 
   const gOk = hasGeminiKeyConfigured();
@@ -110,7 +110,7 @@ export function AiSettingsModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 6 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="relative flex max-h-[min(92vh,44rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#2d333b] bg-[#16191e] shadow-2xl"
+            className="relative flex max-h-[min(92vh,52rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2d333b] bg-[#16191e] shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-[#2d333b] px-4 py-3">
@@ -178,9 +178,12 @@ export function AiSettingsModal({
               <div className="space-y-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-3">
                 <p className="flex items-center gap-2 text-xs font-bold text-amber-200">
                   <Sparkles className="h-4 w-4" /> Google Gemini
+                  <span className="ml-auto rounded-md bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300/90">
+                    {GEMINI_IMAGE_MODELS.length} imagini · {GEMINI_TEXT_MODELS.length} text
+                  </span>
                 </p>
                 <AiModelPicker
-                  title="Model imagini"
+                  title={`Model imagini (${GEMINI_IMAGE_MODELS.length})`}
                   hint="Upscale, AI Bleed, mockup."
                   models={GEMINI_IMAGE_MODELS}
                   value={geminiImage}
@@ -202,9 +205,12 @@ export function AiSettingsModal({
               <div className="space-y-4 rounded-xl border border-sky-500/20 bg-sky-500/[0.04] p-3">
                 <p className="flex items-center gap-2 text-xs font-bold text-sky-200">
                   <Cpu className="h-4 w-4" /> OpenAI / ChatGPT
+                  <span className="ml-auto rounded-md bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-300/90">
+                    {OPENAI_IMAGE_MODELS.length} imagini · {OPENAI_TEXT_MODELS.length} text
+                  </span>
                 </p>
                 <AiModelPicker
-                  title="Model imagini"
+                  title={`Model imagini (${OPENAI_IMAGE_MODELS.length})`}
                   hint="images.edit — upscale, bleed, mockup."
                   models={OPENAI_IMAGE_MODELS}
                   value={openaiImage}

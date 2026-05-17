@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Cpu, Loader2, Send } from "lucide-react";
 import { cn } from "../lib/utils";
 import { toast } from "sonner";
+import { formatAiApiError } from "../lib/apiErrorMessage";
 
 const PICK_BTN =
   "w-full rounded-lg border border-[var(--border)] bg-[var(--card)] py-2.5 text-xs font-semibold text-[var(--text)] transition-colors hover:border-amber-500/40 hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-40";
@@ -22,6 +23,7 @@ export type AiDualCompareDialogProps = {
 
 function ImageWithRefineColumn(props: {
   label: string;
+  provider: "gemini" | "openai";
   displayUrl: string | null;
   errorText?: string;
   onPick: (chosenUrl: string | null) => void;
@@ -29,7 +31,7 @@ function ImageWithRefineColumn(props: {
   refine: (imageUrl: string, instruction: string) => Promise<string | null>;
   onDisplayChange: (url: string | null) => void;
 }) {
-  const { label, displayUrl, errorText, onPick, pickLabel, refine, onDisplayChange } = props;
+  const { label, provider, displayUrl, errorText, onPick, pickLabel, refine, onDisplayChange } = props;
   const [instruction, setInstruction] = useState("");
   const [refining, setRefining] = useState(false);
 
@@ -53,8 +55,8 @@ function ImageWithRefineColumn(props: {
       } else {
         toast.error("Modelul nu a returnat imagine.");
       }
-    } catch {
-      toast.error("Rafinarea a eșuat.");
+    } catch (err) {
+      toast.error(formatAiApiError(err));
     } finally {
       setRefining(false);
     }
@@ -85,9 +87,13 @@ function ImageWithRefineColumn(props: {
             )}
           </>
         ) : (
-          <div className="flex min-h-[12rem] flex-col items-center justify-center gap-2 p-4 text-center text-xs text-red-400">
-            <span>Eșuat</span>
-            {errorText && <span className="text-[10px] leading-snug text-red-300/80">{errorText}</span>}
+          <div className="flex min-h-[12rem] flex-col items-center justify-center gap-2 p-4 text-center">
+            <span className="text-xs font-bold uppercase tracking-wide text-red-400">Eșuat</span>
+            <p className="max-w-full text-[11px] leading-relaxed text-red-200">
+              {errorText
+                ? formatAiApiError(errorText, { provider })
+                : "Modelul nu a returnat imagine."}
+            </p>
           </div>
         )}
       </div>
@@ -181,6 +187,7 @@ export function AiDualCompareDialog({
         <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
           <ImageWithRefineColumn
             label="Google Gemini"
+            provider="gemini"
             displayUrl={geminiDisplay}
             errorText={gemini.error}
             onPick={onPickGemini}
@@ -190,6 +197,7 @@ export function AiDualCompareDialog({
           />
           <ImageWithRefineColumn
             label="OpenAI (ChatGPT)"
+            provider="openai"
             displayUrl={openaiDisplay}
             errorText={openai.error}
             onPick={onPickOpenai}

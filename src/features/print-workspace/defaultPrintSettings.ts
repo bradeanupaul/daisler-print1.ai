@@ -22,5 +22,5 @@ export const DEFAULT_PRINT_SETTINGS: ProcessingSettings = {
   autoMaximize: true,
   showCropMarks: false,
   pdfPageRange: "all",
-  upscaleMode: "extend",
+  upscaleMode: "recompose",
 };
