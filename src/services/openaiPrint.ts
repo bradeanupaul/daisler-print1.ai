@@ -21,15 +21,20 @@ import {
   appendCritiqueToPrompt,
   buildImageCritiqueInstruction,
   parseImageCritiqueJson,
+  type ImageCritiqueRequest,
 } from "../lib/imageCritique";
 import {
   formatGenerationProfileHint,
   resolvePrintGenerationProfile,
 } from "../lib/printGenerationProfile";
 import { prepareImageForAiUpscale } from "../lib/imageDataUrl";
-import { buildUpscaleExtendOutpaintPrompt } from "../lib/extendOutpaintPrompt";
-import { buildUpscaleRecomposePrompt } from "../lib/recomposePrompt";
-import { composeExtendCenterContain, pickCanvasSizeForMmAspect } from "../lib/upscaleCompose";
+import { buildUpscalePrompt } from "../lib/aiUpscalePrompts";
+import { addAlgorithmicBleed, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
+import {
+  composeExtendOutpaintCanvas,
+  composeRecomposeCanvasForGemini,
+  pickUpscaleNetCanvasPixels,
+} from "../lib/upscaleCompose";
 import type { UpscaleMode } from "../types";
 import type { ProcessingStageReporter } from "../lib/processingStage";
 import { usageFromReporter } from "../lib/processingStage";
@@ -203,15 +208,9 @@ ${userInstruction}`;
   return imageEditSingle(imageData, prompt, widthMmHint, heightMmHint, reporter, targetDpi);
 }
 
-type CritiqueContext = {
-  intentSummary: string;
-  referenceForCritique: string;
-};
-
 async function critiqueGeneratedImage(
   generatedDataUrl: string,
-  intentSummary: string,
-  referenceDataUrl: string,
+  request: ImageCritiqueRequest,
   reporter?: ProcessingStageReporter,
 ): Promise<{
   shouldRegenerate: boolean;
@@ -219,7 +218,7 @@ async function critiqueGeneratedImage(
   promptAddendum: string;
 }> {
   const client = getClient();
-  const instruction = buildImageCritiqueInstruction(intentSummary);
+  const instruction = buildImageCritiqueInstruction(request);
 
   try {
     const visionModel = resolveOpenAIVisionModel();
@@ -231,8 +230,8 @@ async function critiqueGeneratedImage(
           role: "user",
           content: [
             { type: "text", text: instruction },
-            { type: "text", text: "REFERENCE:" },
-            { type: "image_url", image_url: { url: referenceDataUrl } },
+            { type: "text", text: "ORIGINAL:" },
+            { type: "image_url", image_url: { url: request.originalImageUrl } },
             { type: "text", text: "OUTPUT:" },
             { type: "image_url", image_url: { url: generatedDataUrl } },
           ],
@@ -253,12 +252,13 @@ async function imageEditFromDataUrlWithQualityLoop(
   basePrompt: string,
   widthMmHint: number,
   heightMmHint: number,
-  critique: CritiqueContext,
+  critique: ImageCritiqueRequest,
   reporter?: ProcessingStageReporter,
   targetDpi?: number,
+  opts?: { maxPasses?: number; skipCritique?: boolean },
 ): Promise<string | null> {
-  const maxPasses = resolveImageMaxPasses();
-  const useCritique = resolveImageCritiqueEnabled();
+  const maxPasses = opts?.maxPasses ?? resolveImageMaxPasses();
+  const useCritique = !opts?.skipCritique && resolveImageCritiqueEnabled();
   const model = resolveOpenAIImageModelForEdit();
   const profile = resolvePrintGenerationProfile(targetDpi);
   const profileHint = formatGenerationProfileHint(profile);
@@ -297,12 +297,7 @@ async function imageEditFromDataUrlWithQualityLoop(
     if (!useCritique || pass >= maxPasses - 1) break;
 
     reporter?.stage(`OpenAI: verificare calitate (pas ${pass + 1})…`);
-    const c = await critiqueGeneratedImage(
-      out,
-      critique.intentSummary,
-      critique.referenceForCritique,
-      reporter,
-    );
+    const c = await critiqueGeneratedImage(out, critique, reporter);
     if (!c.shouldRegenerate || !String(c.promptAddendum || "").trim()) {
       reporter?.stage("OpenAI: verificare OK, nu e nevoie de regenerare.");
       break;
@@ -367,11 +362,7 @@ Writing rules for issues and recommendations:
     };
   } catch (e: unknown) {
     console.error("OpenAI analyzePrintQuality failed:", e);
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("429") || msg.toLowerCase().includes("rate")) {
-      throw new Error("QUOTA_EXHAUSTED");
-    }
-    return null;
+    throw e;
   }
 }
 
@@ -442,20 +433,34 @@ export async function upscaleImage(
   reporter?: ProcessingStageReporter,
   targetDpi?: number,
   safeMarginMm = 0,
+  bleedMm = 0,
 ) {
-  aiLog("openai upscale start", { mode, netW, netH, targetDpi, safeMarginMm });
+  aiLog("openai upscale start", { mode, netW, netH, targetDpi, safeMarginMm, bleedMm });
   const prepared = await prepareImageForAiUpscale(imageData);
   let editSource = prepared;
   let prompt: string;
 
+  const promptCtx = { formatName, netW, netH, safeMarginMm, bleedMm };
+  const { width: cw, height: ch } = pickUpscaleNetCanvasPixels(netW, netH, targetDpi);
+
   if (mode === "extend") {
-    const { width: cw, height: ch } = pickCanvasSizeForMmAspect(netW, netH, targetDpi);
-    reporter?.stage(`OpenAI: canvas extend net (${cw}×${ch}px)…`);
-    editSource = await composeExtendCenterContain(prepared, cw, ch);
-    prompt = buildUpscaleExtendOutpaintPrompt({ formatName, netW, netH, safeMarginMm });
+    reporter?.stage(`OpenAI: canvas extend ${cw}×${ch}px…`);
+    const composed = await composeExtendOutpaintCanvas(prepared, cw, ch);
+    editSource = composed.dataUrl;
+    prompt = buildUpscalePrompt("extend", {
+      ...promptCtx,
+      canvasPxW: cw,
+      canvasPxH: ch,
+      bands: composed.bands,
+    });
   } else {
-    reporter?.stage("OpenAI: pregătesc upscale recompose…");
-    prompt = buildUpscaleRecomposePrompt({ formatName, netW, netH, safeMarginMm });
+    reporter?.stage(`OpenAI: canvas recompose ${cw}×${ch}px…`);
+    editSource = await composeRecomposeCanvasForGemini(prepared, cw, ch);
+    prompt = buildUpscalePrompt("recompose", {
+      ...promptCtx,
+      canvasPxW: cw,
+      canvasPxH: ch,
+    });
   }
 
   const url = await imageEditFromDataUrlWithQualityLoop(
@@ -463,7 +468,7 @@ export async function upscaleImage(
     prompt,
     netW,
     netH,
-    { intentSummary: prompt, referenceForCritique: editSource },
+    { mode, intentSummary: prompt, originalImageUrl: prepared },
     reporter,
     targetDpi,
   );
@@ -477,17 +482,18 @@ export async function generativeFill(
   targetWidthMm: number,
   targetHeightMm: number,
   reporter?: ProcessingStageReporter,
+  targetDpi?: number,
 ) {
-  reporter?.stage(`OpenAI: extind bleed (${bleedMm}mm pe latură)…`);
-  const prompt = `DESIGN EXTENSION for print bleed (~${bleedMm}mm on each side). The central ${targetWidthMm}×${targetHeightMm} mm artwork must stay pixel-identical — only the outer bleed band is edited.
-
-You must continue REAL graphic structure from the edges (sunbursts, rays, stripes, frames, halftone, texture, ornamental borders) into the new area. FORBIDDEN: wide flat cream/beige/paper voids next to busy patterned edges; no white “picture frame” halo. Seamless continuation of the same visual language.`;
-  const totalW = targetWidthMm + 2 * bleedMm;
-  const totalH = targetHeightMm + 2 * bleedMm;
-  return imageEditFromDataUrlWithQualityLoop(imageData, prompt, totalW, totalH, {
-    intentSummary: prompt,
-    referenceForCritique: imageData,
-  }, reporter);
+  const layout: PrintLayoutMm = {
+    netWidthMm: targetWidthMm,
+    netHeightMm: targetHeightMm,
+    bleedMm,
+    safeMarginMm: 0,
+    dpi: targetDpi ?? 300,
+  };
+  return addAlgorithmicBleed(imageData, layout, reporter?.stage, {
+    applySafeZoneFill: false,
+  });
 }
 
 export async function generateCustomMockup(
@@ -499,7 +505,8 @@ export async function generateCustomMockup(
 
 The attached image is the print artwork. Integrate it realistically onto the product with correct lighting, perspective, and material. Studio background, professional product photo.`;
   return imageEditFromDataUrlWithQualityLoop(designImageData, prompt, 1, 1, {
+    mode: "recompose",
     intentSummary: prompt,
-    referenceForCritique: designImageData,
+    originalImageUrl: designImageData,
   });
 }

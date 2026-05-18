@@ -1,10 +1,20 @@
-/** Instrucțiuni safe zone pentru prompturile AI (nu post-procesare, nu bleed). */
+/** Safe zone + bleed în prompturi AI — doar procente, fără mm. */
+
+export type SafeZonePercents = {
+  insetXPct: number;
+  insetYPct: number;
+};
+
+export type BleedPercents = {
+  bleedXPctPerSide: number;
+  bleedYPctPerSide: number;
+};
 
 export function computeSafeZonePercents(
   safeMarginMm: number,
   netWidthMm: number,
   netHeightMm: number,
-): { insetXPct: number; insetYPct: number } | null {
+): SafeZonePercents | null {
   if (!safeMarginMm || safeMarginMm <= 0) return null;
   if (netWidthMm <= 0 || netHeightMm <= 0) return null;
   return {
@@ -13,19 +23,70 @@ export function computeSafeZonePercents(
   };
 }
 
+export function computeBleedPercents(
+  bleedMm: number,
+  netWidthMm: number,
+  netHeightMm: number,
+): BleedPercents | null {
+  if (!bleedMm || bleedMm <= 0) return null;
+  if (netWidthMm <= 0 || netHeightMm <= 0) return null;
+  return {
+    bleedXPctPerSide: Math.round((bleedMm / netWidthMm) * 1000) / 10,
+    bleedYPctPerSide: Math.round((bleedMm / netHeightMm) * 1000) / 10,
+  };
+}
+
+export type PrintMarginsPromptOpts = {
+  netWidthMm: number;
+  netHeightMm: number;
+  safeMarginMm?: number;
+  bleedMm?: number;
+};
+
+/**
+ * Bloc universal pentru extend + recompose: safe zone (%) + bleed (%) — post-procesare automată.
+ */
+export function buildPrintMarginsPromptBlock(opts: PrintMarginsPromptOpts): string {
+  const { netWidthMm, netHeightMm, safeMarginMm = 0, bleedMm = 0 } = opts;
+  const lines: string[] = [
+    `PRINT CANVAS: output = NET trim only (${netWidthMm}×${netHeightMm} mm).`,
+  ];
+
+  const safe = computeSafeZonePercents(safeMarginMm, netWidthMm, netHeightMm);
+  if (safe) {
+    lines.push(
+      "",
+      "SAFE ZONE (inset from each trim edge — use percentages, not mm):",
+      `- Left and right: ${safe.insetXPct}% of total width each (no effective content in this band).`,
+      `- Top and bottom: ${safe.insetYPct}% of total height each (no effective content in this band).`,
+      "- FORBIDDEN inside safe zone: text, typography, logos, faces, QR codes, product photos, icons, buttons, CTAs, key subjects, readable copy.",
+      "- ALLOWED in safe zone only: seamless decorative background (solid color, gradient, texture, pattern) that continues from the artwork.",
+      "- All critical content must stay inside the inner area (beyond these percentages from the trim edge).",
+    );
+  }
+
+  const bleed = computeBleedPercents(bleedMm, netWidthMm, netHeightMm);
+  if (bleed) {
+    lines.push(
+      "",
+      "BLEED (added automatically after generation — do not draw it):",
+      `- ${bleed.bleedXPctPerSide}% of width per side and ${bleed.bleedYPctPerSide}% of height per side will be extrapolated OUTSIDE this trim image.`,
+      "- Do NOT include bleed, crop marks, registration marks, or extra canvas beyond the net trim in your output.",
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/** @deprecated Folosește buildPrintMarginsPromptBlock */
 export function buildSafeZoneInstruction(
   safeMarginMm: number,
   netWidthMm: number,
   netHeightMm: number,
 ): string {
-  const pct = computeSafeZonePercents(safeMarginMm, netWidthMm, netHeightMm);
-  if (!pct) return "";
-
-  return `
-SAFE ZONE (obligatoriu la generare):
-- Trim net: ${netWidthMm}×${netHeightMm} mm.
-- Margine safe: ${safeMarginMm} mm pe fiecare latură ≈ ${pct.insetXPct}% din lățime (stânga/dreapta) și ≈ ${pct.insetYPct}% din înălțime (sus/jos).
-- TOT textul, logo-urile, fețele, codurile QR și elementele critice trebuie să rămână ÎNĂUNTRUL zonei safe (nu mai aproape de marginea trim decât procentele de mai sus).
-- Doar fundal decorativ (gradient, textură, culoare uniformă) poate intra în banda dintre safe zone și marginea trim.
-- NU desena bleed — bleed-ul de tipar este adăugat automat DUPĂ generare, în afara celor ${netWidthMm}×${netHeightMm} mm.`;
+  return buildPrintMarginsPromptBlock({
+    netWidthMm,
+    netHeightMm,
+    safeMarginMm,
+  });
 }

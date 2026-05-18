@@ -257,10 +257,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const dataUrl = canvas.toDataURL('image/png');
       setPreviewUrl(dataUrl);
       setProcessedUrl(dataUrl);
-      
-      // Auto trigger analysis for the rendered page
-      handleAIAnalysis(dataUrl);
-      
+
       return pdf.numPages;
     } catch (err) {
       console.error("Error rendering PDF page:", err);
@@ -334,8 +331,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           const img = new Image();
           img.onload = () => {
             setOriginalDimensions({ width: img.width, height: img.height });
-            // Auto trigger analysis
-            handleAIAnalysis(url);
             // Check if upscale is needed
             const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
             const targetW = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
@@ -423,6 +418,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       sourceKind: "upscale" | "generative_fill" | "processed_preview",
       suffix: string,
       metadata?: Record<string, unknown>,
+      opts?: { clearUsageAfter?: boolean },
     ) => {
       if (!user || !isSupabaseConfigured()) return;
       try {
@@ -444,7 +440,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
             ...(aiUsage ? { ai_usage: serializeAiUsage(aiUsage) } : {}),
           },
         );
-        lastAiGenerationUsageRef.current = null;
+        if (opts?.clearUsageAfter !== false) {
+          lastAiGenerationUsageRef.current = null;
+        }
         onHistoryRefresh();
       } catch (err) {
         console.warn("persistProcessedToHistory:", err);
@@ -453,16 +451,53 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     [user, file, settings.formatId, ensureHistoryGroup, onHistoryRefresh],
   );
 
+  /** Salvează în istoric fiecare variantă AI (comparare duală sau draft înainte de alegere). */
+  const persistDualAiVariantsToHistory = useCallback(
+    async (
+      dual: Extract<UpscaleGenerationResult, { kind: "dual" }>,
+      flow: "upscale" | "generative_fill",
+      mode?: UpscaleMode,
+    ) => {
+      const usageSnapshot = lastAiGenerationUsageRef.current;
+      const baseMeta = { flow, mode, stage: "ai_output_before_pick" as const };
+      if (dual.gemini.imageUrl) {
+        lastAiGenerationUsageRef.current = usageSnapshot;
+        await persistProcessedToHistory(
+          dual.gemini.imageUrl,
+          flow === "upscale" ? "upscale" : "generative_fill",
+          `ai_gemini_${mode ?? "variant"}`,
+          { ...baseMeta, provider: "gemini" },
+          { clearUsageAfter: false },
+        );
+      }
+      if (dual.openai.imageUrl) {
+        lastAiGenerationUsageRef.current = usageSnapshot;
+        await persistProcessedToHistory(
+          dual.openai.imageUrl,
+          flow === "upscale" ? "upscale" : "generative_fill",
+          `ai_openai_${mode ?? "variant"}`,
+          { ...baseMeta, provider: "openai" },
+          { clearUsageAfter: false },
+        );
+      }
+      lastAiGenerationUsageRef.current = usageSnapshot;
+    },
+    [persistProcessedToHistory],
+  );
+
   const applyAlgorithmicBleed = useCallback(
     async (
       url: string | null,
-      options?: { artworkFit?: "contain" | "cover"; layoutSettings?: ProcessingSettings },
+      options?: {
+        layoutSettings?: ProcessingSettings;
+        applySafeZoneFill?: boolean;
+      },
     ): Promise<string | null> => {
       if (!url) return null;
       const layout = getPrintLayoutFromSettings(options?.layoutSettings ?? settings);
       try {
         return await addAlgorithmicBleed(url, layout, (m) => processing.stage(m), {
-          artworkFit: options?.artworkFit,
+          applySafeZoneFill: options?.applySafeZoneFill,
         });
       } catch (e) {
         console.warn("addAlgorithmicBleed failed:", e);
@@ -505,10 +540,10 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       setCanvasRevision((n) => n + 1);
       aiLog("AI result on canvas (before bleed)", { len: dataUrl.length });
 
-      processing.stage("Adaug bleed algoritmic (după AI)…");
+      processing.stage("Plasez AI în zona net, apoi generez bleed până la marginile fișierului…");
       const finalized = await applyAlgorithmicBleed(dataUrl, {
-        artworkFit: "contain",
         layoutSettings,
+        applySafeZoneFill: false,
       });
       if (finalized) {
         setProcessedUrl(finalized);
@@ -517,12 +552,20 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         aiLog("finalize with algorithmic bleed", { len: finalized.length });
       }
       setIsUpscaleNeeded(false);
-      if (finalized && meta?.historyLabel) {
-        void persistProcessedToHistory(finalized, "upscale", meta.historyLabel, {
+      if (meta?.historyLabel) {
+        void persistProcessedToHistory(dataUrl, "upscale", `${meta.historyLabel}_ai_raw`, {
           mode: meta.mode,
           provider: meta.provider,
-          postProcess: "algorithmic_bleed",
-        });
+          stage: "ai_output",
+        }, { clearUsageAfter: false });
+        if (finalized) {
+          void persistProcessedToHistory(finalized, "upscale", meta.historyLabel, {
+            mode: meta.mode,
+            provider: meta.provider,
+            postProcess: "algorithmic_bleed",
+            stage: "after_bleed",
+          });
+        }
       }
       return finalized ?? dataUrl;
     },
@@ -913,7 +956,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           const img = new Image();
           img.onload = () => {
             setOriginalDimensions({ width: img.width, height: img.height });
-            handleAIAnalysis(imageUrl);
             const currentFormat = PRINT_FORMATS.find((f) => f.id === effectiveFormatId);
             const targetW =
               effectiveFormatId === "custom"
@@ -979,6 +1021,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const formatName = currentFormat?.name || 'Custom Format';
       const targetDpi = settings.dpi || 300;
       const safeMargin = settings.safeMargin ?? 3;
+      const bleedMm = settings.bleed ?? 3;
 
       const result = await upscaleImage(
         previewUrl,
@@ -989,6 +1032,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         processing.getReporter(),
         targetDpi,
         safeMargin,
+        bleedMm,
       );
       lastAiGenerationUsageRef.current = processing.getUsageSummary();
 
@@ -1030,6 +1074,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         } else {
           toast.success("Ambele variante sunt gata — alege în dialog.", { duration: 6000 });
         }
+        void persistDualAiVariantsToHistory(result, "upscale", mode);
         processing.done();
         setDualImagePicker({ flow: "upscale", dual: result });
         return;
@@ -1042,7 +1087,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           historyLabel: `upscale_${mode}`,
         });
         toast.dismiss(toastId);
-        toast.success("Upscale gata — bleed + ghidaje active.");
+        toast.success("Upscale gata — bleed algoritmic + ghidaje active.");
       } else {
         throw new Error("EMPTY_RESPONSE");
       }
@@ -1073,7 +1118,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           historyLabel: "pick_gemini",
         });
         processing.done();
-        toast.success("Upscale gata — bleed + ghidaje active.");
+        toast.success("Upscale gata — bleed algoritmic + ghidaje active.");
       } else {
         const finalized = await applyAlgorithmicBleed(url);
         setProcessedUrl(finalized);
@@ -1109,7 +1154,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           historyLabel: "pick_openai",
         });
         processing.done();
-        toast.success("Upscale gata — bleed + ghidaje active.");
+        toast.success("Upscale gata — bleed algoritmic + ghidaje active.");
       } else {
         const finalized = await applyAlgorithmicBleed(url);
         setProcessedUrl(finalized);
@@ -1153,16 +1198,27 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       toast.error("Setează bleed (mm) înainte de a genera marginile.");
       return;
     }
-    processing.begin("Pornesc bleed algoritmic…");
-    const toastId = toast.loading("Adaug bleed (extrapolare fundal)…");
+    processing.begin("Adaug bleed algoritmic…");
+    const toastId = toast.loading(`Adaug bleed (${settings.bleed} mm pe latură)…`);
     try {
-      const finalized = await applyAlgorithmicBleed(source);
+      const layoutSettings: ProcessingSettings = {
+        ...settings,
+        showGuides: true,
+        addSafeZone: true,
+        bleed: settings.bleed ?? 3,
+        safeMargin: settings.safeMargin ?? 3,
+      };
+      setSettings(layoutSettings);
+      const finalized = await applyAlgorithmicBleed(source, {
+        layoutSettings,
+        applySafeZoneFill: false,
+      });
       if (!finalized) throw new Error("EMPTY_RESPONSE");
       setProcessedUrl(finalized);
       setPreviewUrl(finalized);
       setCanvasRevision((n) => n + 1);
       toast.dismiss(toastId);
-      processing.stage("Bleed algoritmic adăugat.");
+      processing.stage("Bleed algoritmic adăugat (extrapolare ultim pixel, fără safe sintetic).");
       void persistProcessedToHistory(finalized, "generative_fill", "bleed_algorithmic", {
         postProcess: "algorithmic_bleed",
       });
@@ -2264,14 +2320,17 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           style={{
                             aspectRatio: (() => {
                               const f = PRINT_FORMATS.find((fmt) => fmt.id === settings.formatId);
-                              const w =
+                              const netW =
                                 settings.formatId === "custom"
                                   ? settings.customWidth || 1
                                   : f?.width || 1;
-                              const h =
+                              const netH =
                                 settings.formatId === "custom"
                                   ? settings.customHeight || 1
                                   : f?.height || 1;
+                              const bleed = settings.bleed ?? 0;
+                              const w = netW + 2 * bleed;
+                              const h = netH + 2 * bleed;
                               return `${w} / ${h}`;
                             })(),
                             maxHeight: "100%",
@@ -2308,7 +2367,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             src={canvasDisplayUrl}
                             alt="Processed"
                             className={cn(
-                              "h-full w-full object-contain transition-all duration-300",
+                              "h-full w-full object-cover transition-all duration-300",
                               settings.simulateCMYK && "simulate-cmyk",
                             )}
                           />

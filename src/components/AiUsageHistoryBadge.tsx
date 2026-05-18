@@ -15,9 +15,8 @@ type AiUsageHistoryBadgeProps = {
   className?: string;
 };
 
-const POPUP_W = 272;
-const POPUP_EST_H = 220;
-const GAP = 6;
+const POPUP_W = 300;
+const GAP = 4;
 
 function ProviderSection(props: {
   title: string;
@@ -37,7 +36,7 @@ function ProviderSection(props: {
             className="rounded-md bg-black/25 px-2 py-1.5 text-[10px] leading-snug text-[#c9d1d9]"
           >
             <p className="font-medium text-[#e6edf3]">{call.label}</p>
-            <p className="text-[#8b949e]">{call.model}</p>
+            <p className="break-all text-[#8b949e]">{call.model}</p>
             <p className="tabular-nums">
               {formatTokenCount(call.totalTokens)} tokeni
               <span className="text-[#6e7681]">
@@ -92,7 +91,10 @@ function UsagePopupContent({ metadata }: { metadata: unknown }) {
         </p>
       ) : (
         <>
-          <div className="max-h-[min(14rem,50vh)] space-y-3 overflow-y-auto custom-scrollbar">
+          <div
+            className="max-h-[min(70vh,22rem)] space-y-3 overflow-y-auto overscroll-contain pr-1 custom-scrollbar"
+            onWheel={(e) => e.stopPropagation()}
+          >
             {hasGemini && <ProviderSection title="Gemini" summary={gemini} accentClass="text-sky-400" />}
             {hasOpenai && (
               <ProviderSection title="ChatGPT" summary={openai} accentClass="text-emerald-400" />
@@ -114,30 +116,57 @@ function UsagePopupContent({ metadata }: { metadata: unknown }) {
 export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadgeProps) {
   const usage = parseAiUsageFromMetadata(metadata);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const [coords, setCoords] = useState({ top: 0, left: 0, placeAbove: false });
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const updatePosition = useCallback(() => {
     const el = btnRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
+    const estH = Math.min(window.innerHeight * 0.7, 360);
     const spaceBelow = window.innerHeight - r.bottom - GAP;
-    const placeAbove = spaceBelow < POPUP_EST_H && r.top > POPUP_EST_H;
-    let left = r.left;
+    const placeAbove = spaceBelow < estH && r.top > estH;
+    let left = r.right - POPUP_W;
+    if (left < 8) left = 8;
     if (left + POPUP_W > window.innerWidth - 8) {
       left = window.innerWidth - POPUP_W - 8;
     }
-    left = Math.max(8, left);
     const top = placeAbove ? r.top - GAP : r.bottom + GAP;
     setCoords({ top, left, placeAbove });
   }, []);
 
+  const clearHideTimer = () => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  };
+
+  const scheduleHide = useCallback(() => {
+    if (pinned) return;
+    clearHideTimer();
+    hideTimerRef.current = setTimeout(() => setOpen(false), 280);
+  }, [pinned]);
+
   const show = useCallback(() => {
+    clearHideTimer();
     updatePosition();
     setOpen(true);
   }, [updatePosition]);
 
-  const hide = useCallback(() => setOpen(false), []);
+  const togglePin = useCallback(() => {
+    setPinned((p) => {
+      const next = !p;
+      if (next) {
+        updatePosition();
+        setOpen(true);
+      }
+      return next;
+    });
+  }, [updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -150,21 +179,48 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
     };
   }, [open, updatePosition]);
 
+  useEffect(() => {
+    if (!pinned) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t) || popupRef.current?.contains(t)) return;
+      setPinned(false);
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [pinned]);
+
   const popup =
     open &&
     createPortal(
       <div
+        ref={popupRef}
         role="tooltip"
-        className="fixed z-[200] w-[min(17rem,calc(100vw-1rem))] max-w-[17rem]"
+        className="fixed z-[200]"
         style={{
           left: coords.left,
           top: coords.top,
+          width: POPUP_W,
           transform: coords.placeAbove ? "translateY(-100%)" : undefined,
         }}
         onMouseEnter={show}
-        onMouseLeave={hide}
+        onMouseLeave={scheduleHide}
       >
+        {/* Pod invizibil — cursorul nu pierde hover între buton și popup */}
+        <div
+          className="absolute left-0 right-0 h-2"
+          style={coords.placeAbove ? { bottom: -GAP, height: GAP + 4 } : { top: -GAP, height: GAP + 4 }}
+        />
         <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-2.5 shadow-xl ring-1 ring-black/50">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <span className="text-[9px] text-[#6e7681]">Scroll pentru detalii · click pentru fixare</span>
+            {pinned && (
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300">
+                fixat
+              </span>
+            )}
+          </div>
           <UsagePopupContent metadata={metadata} />
         </div>
       </div>,
@@ -181,13 +237,17 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
           usage
             ? "border-emerald-500/30 text-emerald-400/90 hover:border-emerald-500/50 hover:bg-emerald-500/10"
             : "border-[#30363d] text-[#6e7681] hover:border-[#484f58] hover:text-[#8b949e]",
+          pinned && "ring-1 ring-amber-500/50",
           className,
         )}
         aria-label="Consum tokeni AI"
+        aria-expanded={open}
         onMouseEnter={show}
-        onMouseLeave={hide}
-        onFocus={show}
-        onBlur={hide}
+        onMouseLeave={scheduleHide}
+        onClick={(e) => {
+          e.stopPropagation();
+          togglePin();
+        }}
       >
         <Coins className="h-3 w-3" />
       </button>

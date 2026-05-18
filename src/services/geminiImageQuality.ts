@@ -1,7 +1,7 @@
 /**
  * Generare imagine Gemini + buclă QA (text/vision) + regenerare — echivalent OpenAI.
  */
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { resolveGeminiApiKey } from "../lib/aiKeys";
 import {
   resolveImageCritiqueEnabled,
@@ -12,6 +12,7 @@ import {
   isImagenModel,
   resolveGeminiImageModel,
   resolveGeminiImageModelForEdit,
+  resolveGeminiImageSizeForModel,
 } from "../lib/geminiImageConfig";
 import {
   formatGenerationProfileHint,
@@ -22,16 +23,15 @@ import {
   appendCritiqueToPrompt,
   buildImageCritiqueInstruction,
   parseImageCritiqueJson,
+  type ImageCritiqueRequest,
   type ImageCritiqueResult,
 } from "../lib/imageCritique";
+import { extractApiErrorText } from "../lib/apiErrorMessage";
 import { ensureImageDataUrl, resolveImageForGemini } from "../lib/imageDataUrl";
 import type { ProcessingStageReporter } from "../lib/processingStage";
 import { usageFromReporter } from "../lib/processingStage";
 
-export type GeminiCritiqueContext = {
-  intentSummary: string;
-  referenceForCritique: string;
-};
+export type GeminiCritiqueContext = ImageCritiqueRequest;
 
 type GeminiImageGenConfig = {
   aspectRatio: string;
@@ -47,38 +47,81 @@ async function geminiInlineImage(imageUrl: string) {
   return { inlineData: { data, mimeType } };
 }
 
-function extractImageDataUrl(response: {
+type GeminiGenerateResponse = {
   candidates?: Array<{
     content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string }; text?: string }> };
     finishReason?: string;
   }>;
   promptFeedback?: { blockReason?: string };
-}): string | null {
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData?.data) {
-      return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+  /** SDK helper — base64 imagine din primul candidat. */
+  data?: string;
+};
+
+function extractImageDataUrl(response: GeminiGenerateResponse): string | null {
+  for (const candidate of response.candidates || []) {
+    for (const part of candidate.content?.parts || []) {
+      if (part.inlineData?.data) {
+        return `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
+      }
     }
+  }
+  const sdkData = response.data?.trim();
+  if (sdkData) {
+    if (sdkData.startsWith("data:image/")) return sdkData;
+    return `data:image/png;base64,${sdkData}`;
   }
   return null;
 }
 
-function requireGeminiImageOutput(
-  response: Parameters<typeof extractImageDataUrl>[0],
-  model: string,
-): string {
+function friendlyFinishReason(reason: string, model: string): string {
+  switch (reason) {
+    case "IMAGE_OTHER":
+      return `Gemini (${model}) nu a returnat imagine (IMAGE_OTHER — uneori la 2K sau prompt complex). Am încercat automat 1K; dacă persistă, schimbă modelul în Setări AI (ex. Nano Banana Pro) sau reduce OPENAI_IMAGE_MAX_PASSES=1.`;
+    case "NO_IMAGE":
+      return `Gemini (${model}) nu a generat imagine (NO_IMAGE). Verifică că modelul suportă edit cu imagine sursă.`;
+    case "IMAGE_PROHIBITED_CONTENT":
+      return `Gemini (${model}): conținut blocat de filtrele de siguranță.`;
+    case "IMAGE_RECITATION":
+      return `Gemini (${model}): generare oprită (posibilă copiere din sursă protejată).`;
+    default:
+      return `Gemini (${model}) nu a generat imagine · finish: ${reason}`;
+  }
+}
+
+function requireGeminiImageOutput(response: GeminiGenerateResponse, model: string): string {
   const url = extractImageDataUrl(response);
   if (url) return url;
   const c0 = response.candidates?.[0];
   const reason = c0?.finishReason || "UNKNOWN";
   const block = response.promptFeedback?.blockReason;
   const text = c0?.content?.parts?.find((p) => p.text)?.text?.trim();
-  const bits = [
-    `Gemini (${model}) nu a generat imagine`,
-    reason ? `finish: ${reason}` : "",
-    block ? `block: ${block}` : "",
-    text ? text.slice(0, 160) : "",
-  ].filter(Boolean);
+  const base = friendlyFinishReason(reason, model);
+  const bits = [base, block ? `block: ${block}` : "", text ? text.slice(0, 160) : ""].filter(Boolean);
   throw new Error(bits.join(" · "));
+}
+
+function buildNativeGenerateConfig(
+  model: string,
+  imageConfig: GeminiImageGenConfig,
+): { responseModalities: Modality[]; imageConfig: { aspectRatio: string; imageSize?: string } } {
+  const imageSize = resolveGeminiImageSizeForModel(model, imageConfig.imageSize ?? "1K");
+  return {
+    responseModalities: [Modality.TEXT, Modality.IMAGE],
+    imageConfig: {
+      aspectRatio: imageConfig.aspectRatio,
+      imageSize,
+    },
+  };
+}
+
+function isRetryableImageFinish(err: unknown): boolean {
+  const msg = extractApiErrorText(err).toUpperCase();
+  return (
+    msg.includes("IMAGE_OTHER") ||
+    msg.includes("NO_IMAGE") ||
+    msg.includes("NU A GENERAT IMAGINE") ||
+    msg.includes("RĂSPUNS GOL")
+  );
 }
 
 /** Imagen: max ~480 tokeni — trunchiem promptul. */
@@ -182,29 +225,45 @@ async function geminiNativeGenerateImageOnce(
   reporter: ProcessingStageReporter | undefined,
   usageLabel: string,
   apiKey?: string,
+  modelOverride?: string,
 ): Promise<string | null> {
   const ai = getAI(apiKey);
-  const model = resolveGeminiImageModelForEdit();
+  const model = modelOverride ?? resolveGeminiImageModelForEdit();
   const imagePart = await geminiInlineImage(await ensureImageDataUrl(inputDataUrl));
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ parts: [{ text: prompt }, imagePart] }],
-    config: {
-      imageConfig: {
-        aspectRatio: imageConfig.aspectRatio,
-        ...(imageConfig.imageSize ? { imageSize: imageConfig.imageSize } : {}),
-      },
-    },
-  });
+  const tiers: Array<"1K" | "2K" | "4K"> = [];
+  const primary = resolveGeminiImageSizeForModel(model, imageConfig.imageSize ?? "1K");
+  tiers.push(primary);
+  if (primary !== "1K") tiers.push("1K");
 
-  usageFromReporter(reporter)?.recordGemini(
-    model,
-    usageLabel,
-    response.usageMetadata,
-    imageConfig.imageSize ?? "2K",
-  );
-  return requireGeminiImageOutput(response, model);
+  let lastErr: unknown;
+  for (let i = 0; i < tiers.length; i++) {
+    const tier = tiers[i]!;
+    const cfg = buildNativeGenerateConfig(model, { ...imageConfig, imageSize: tier });
+    if (i > 0) {
+      reporter?.stage(`${model}: reîncerc cu ${tier} (IMAGE_OTHER / fără imagine)…`);
+    }
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [{ parts: [{ text: prompt }, imagePart] }],
+        config: cfg,
+      });
+
+      usageFromReporter(reporter)?.recordGemini(
+        model,
+        i > 0 ? `${usageLabel} (retry ${tier})` : usageLabel,
+        response.usageMetadata,
+        tier,
+      );
+      return requireGeminiImageOutput(response as GeminiGenerateResponse, model);
+    } catch (e) {
+      lastErr = e;
+      if (i < tiers.length - 1 && isRetryableImageFinish(e)) continue;
+      throw e instanceof Error ? e : new Error(extractApiErrorText(e));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(extractApiErrorText(lastErr));
 }
 
 async function geminiGenerateImageOnce(
@@ -214,8 +273,9 @@ async function geminiGenerateImageOnce(
   reporter: ProcessingStageReporter | undefined,
   usageLabel: string,
   apiKey?: string,
+  modelOverride?: string,
 ): Promise<string | null> {
-  const model = resolveGeminiImageModelForEdit();
+  const model = modelOverride ?? resolveGeminiImageModelForEdit();
   if (isImagenModel(model)) {
     return imagenGenerateOnce(prompt, imageConfig, reporter, usageLabel, apiKey);
   }
@@ -226,22 +286,22 @@ async function geminiGenerateImageOnce(
     reporter,
     usageLabel,
     apiKey,
+    model,
   );
 }
 
 export async function critiqueGeneratedImageGemini(
   generatedDataUrl: string,
-  intentSummary: string,
-  referenceDataUrl: string,
+  request: ImageCritiqueRequest,
   reporter?: ProcessingStageReporter,
   apiKey?: string,
 ): Promise<ImageCritiqueResult> {
   const ai = getAI(apiKey);
   const textModel = resolveGeminiTextModel();
-  const instruction = buildImageCritiqueInstruction(intentSummary);
+  const instruction = buildImageCritiqueInstruction(request);
 
   try {
-    const refPart = await geminiInlineImage(referenceDataUrl);
+    const originalPart = await geminiInlineImage(request.originalImageUrl);
     const outPart = await geminiInlineImage(generatedDataUrl);
 
     const response = await ai.models.generateContent({
@@ -250,8 +310,8 @@ export async function critiqueGeneratedImageGemini(
         {
           parts: [
             { text: instruction },
-            { text: "REFERENCE:" },
-            refPart,
+            { text: "ORIGINAL:" },
+            originalPart,
             { text: "OUTPUT:" },
             outPart,
           ],
@@ -293,6 +353,10 @@ export async function geminiImageWithQualityLoop(params: {
   apiKey?: string;
   providerLabel?: string;
   targetDpi?: number;
+  /** Model explicit (ex. recompose → 3.1 flash). */
+  forcedImageModel?: string;
+  maxPasses?: number;
+  skipCritique?: boolean;
 }): Promise<string | null> {
   const {
     editSourceDataUrl,
@@ -303,13 +367,19 @@ export async function geminiImageWithQualityLoop(params: {
     apiKey,
     providerLabel = "Gemini",
     targetDpi,
+    forcedImageModel,
+    maxPasses: maxPassesParam,
+    skipCritique,
   } = params;
 
-  const maxPasses = resolveImageMaxPasses();
-  const useCritique = resolveImageCritiqueEnabled();
-  const imageModel = resolveGeminiImageModelForEdit();
+  const maxPasses = maxPassesParam ?? resolveImageMaxPasses();
+  const useCritique = !skipCritique && resolveImageCritiqueEnabled();
+  const imageModel = forcedImageModel ?? resolveGeminiImageModelForEdit();
   const profile = resolvePrintGenerationProfile(targetDpi);
-  const tier = imageConfig.imageSize ?? profile.geminiImageSize;
+  const tier = resolveGeminiImageSizeForModel(
+    imageModel,
+    imageConfig.imageSize ?? profile.geminiImageSize,
+  );
   const profileHint = isImagenModel(imageModel)
     ? `${imageModel.includes("fast") ? "Imagen 4 Fast" : "Imagen 4"} · ${profile.targetDpi} DPI`
     : formatGenerationProfileHint({ ...profile, geminiImageSize: tier });
@@ -342,9 +412,12 @@ export async function geminiImageWithQualityLoop(params: {
         reporter,
         usageLabel,
         apiKey,
+        imageModel,
       );
     } catch (e) {
-      if (pass === 0) throw e;
+      if (pass === 0) {
+        throw new Error(extractApiErrorText(e), { cause: e instanceof Error ? e : undefined });
+      }
       console.warn("geminiGenerateImageOnce retry failed:", e);
       break;
     }
@@ -359,13 +432,7 @@ export async function geminiImageWithQualityLoop(params: {
     if (!useCritique || pass >= maxPasses - 1) break;
 
     reporter?.stage(`${providerLabel}: verificare calitate (pas ${pass + 1})…`);
-    const c = await critiqueGeneratedImageGemini(
-      out,
-      critique.intentSummary,
-      critique.referenceForCritique,
-      reporter,
-      apiKey,
-    );
+    const c = await critiqueGeneratedImageGemini(out, critique, reporter, apiKey);
     if (!c.shouldRegenerate || !String(c.promptAddendum || "").trim()) {
       reporter?.stage(`${providerLabel}: verificare OK, nu e nevoie de regenerare.`);
       break;

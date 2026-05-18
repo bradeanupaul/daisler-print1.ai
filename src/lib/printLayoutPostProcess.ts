@@ -1,14 +1,18 @@
 /**
- * Adaugă bleed algoritmic ÎNAFARA zonei net.
- * `contain` — păstrează tot canvasul AI. `cover` — umple trim-ul (upscale extend).
+ * Post-proces AI upscale: imaginea modelului → strict în zona NET (linie tăiere),
+ * apoi bleed algoritmic doar în afara net-ului, până la marginile fișierului (fără AI).
  */
 import { ensureImageDataUrl } from "./imageDataUrl";
+import { fillSafeZoneMarginsOnCanvas } from "./printSafeZoneFill";
 import { PRINT_FORMATS, type ProcessingSettings } from "../types";
 
 export type PrintArtworkFit = "contain" | "cover";
 
 export type AlgorithmicBleedOptions = {
-  artworkFit?: PrintArtworkFit;
+  /**
+   * Umple safe zone cu extrapolare sintetică (rare). Implicit false — safe zone vine din prompt la AI.
+   */
+  applySafeZoneFill?: boolean;
 };
 
 export type PrintLayoutMm = {
@@ -30,8 +34,36 @@ type PrintLayoutPx = {
 
 type Rgb = [number, number, number];
 
-function mmToPx(mm: number, dpi: number): number {
+export function mmToPx(mm: number, dpi: number): number {
   return Math.max(1, Math.round((mm / 25.4) * dpi));
+}
+
+/** Dimensiuni pixel pentru net (trim) sau total (net + bleed). */
+export function getLayoutPixelSize(
+  layout: PrintLayoutMm,
+  target: "net" | "total",
+): { width: number; height: number } {
+  const px = computePrintLayoutPx(layout);
+  if (target === "net") return { width: px.trim.w, height: px.trim.h };
+  return { width: px.totalW, height: px.totalH };
+}
+
+/** Plasează imaginea la dimensiunile țintă (contain = tot conținutul în cadru; cover = umple, poate tăia). */
+export async function fitImageToLayoutPixels(
+  imageDataUrl: string,
+  layout: PrintLayoutMm,
+  target: "net" | "total",
+  fit: PrintArtworkFit = "cover",
+): Promise<string> {
+  const { width, height } = getLayoutPixelSize(layout, target);
+  const img = await loadImage(await ensureImageDataUrl(imageDataUrl));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D indisponibil");
+  drawArtworkOnCanvas(ctx, img, width, height, fit);
+  return canvas.toDataURL("image/png");
 }
 
 export function getPrintLayoutFromSettings(settings: ProcessingSettings): PrintLayoutMm {
@@ -89,6 +121,34 @@ function drawArtworkOnCanvas(
   ctx.drawImage(img, dx, dy, dw, dh);
 }
 
+/** După upscale: 1:1 dacă modelul returnează exact net-ul; altfel o singură scalare uniformă dacă raportul coincide; cover doar la discrepanță mare. */
+function drawAiUpscaleOutputOntoTrim(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  trimW: number,
+  trimH: number,
+) {
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, trimW, trimH);
+  if (!iw || !ih) return;
+  if (iw === trimW && ih === trimH) {
+    ctx.drawImage(img, 0, 0);
+    return;
+  }
+  const targetR = trimW / trimH;
+  const sourceR = iw / ih;
+  const ratioClose = Math.abs(targetR - sourceR) / Math.max(targetR, sourceR, 1e-9) < 0.002;
+  if (ratioClose) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, iw, ih, 0, 0, trimW, trimH);
+    return;
+  }
+  drawArtworkOnCanvas(ctx, img, trimW, trimH, "cover");
+}
+
 function sampleCornerBg(imageData: ImageData, w: number, h: number): Rgb {
   const { data: px, width } = imageData;
   const patch = 6;
@@ -117,19 +177,10 @@ function sampleCornerBg(imageData: ImageData, w: number, h: number): Rgb {
   return [Math.round(r), Math.round(g), Math.round(b)];
 }
 
-function samplePixel(canvas: HTMLCanvasElement, x: number, y: number): Rgb {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return [255, 255, 255];
-  const d = ctx.getImageData(
-    Math.min(x, canvas.width - 1),
-    Math.min(y, canvas.height - 1),
-    1,
-    1,
-  ).data;
-  return [d[0]!, d[1]!, d[2]!];
-}
-
-/** Plasează canvas-ul net centrat pe fișierul final și extrapolează bleed în jur. */
+/**
+ * Bleed: doar ultimul rând/coloană de pixeli de pe marginea net-ului, întins în banda de bleed.
+ * Zona net (artwork) rămâne neschimbată — `drawImage` o copiază pixel-perfect peste extrapolare.
+ */
 function composeBleedAroundNet(
   netCanvas: HTMLCanvasElement,
   layout: PrintLayoutPx,
@@ -146,75 +197,57 @@ function composeBleedAroundNet(
   ctx.fillRect(0, 0, out.width, out.height);
 
   if (bleedPx <= 0) {
-    ctx.drawImage(netCanvas, 0, 0);
+    ctx.drawImage(netCanvas, trim.x, trim.y);
     return out;
   }
 
   const nw = netCanvas.width;
   const nh = netCanvas.height;
+  const nctxNet = netCanvas.getContext("2d");
+  if (!nctxNet) {
+    ctx.drawImage(netCanvas, trim.x, trim.y);
+    return out;
+  }
 
   ctx.drawImage(netCanvas, 0, 0, nw, 1, trim.x, 0, nw, bleedPx);
   ctx.drawImage(netCanvas, 0, nh - 1, nw, 1, trim.x, trim.y + nh, nw, bleedPx);
   ctx.drawImage(netCanvas, 0, 0, 1, nh, 0, trim.y, bleedPx, nh);
   ctx.drawImage(netCanvas, nw - 1, 0, 1, nh, trim.x + nw, trim.y, bleedPx, nh);
 
-  const corners: Array<[number, number, number, number]> = [
-    [0, 0, bleedPx, bleedPx],
-    [trim.x + nw, 0, bleedPx, bleedPx],
-    [0, trim.y + nh, bleedPx, bleedPx],
-    [trim.x + nw, trim.y + nh, bleedPx, bleedPx],
+  function sampleNetPixel(x: number, y: number): Rgb {
+    const sx = Math.min(Math.max(0, x), nw - 1);
+    const sy = Math.min(Math.max(0, y), nh - 1);
+    const d = nctxNet.getImageData(sx, sy, 1, 1).data;
+    return [d[0]!, d[1]!, d[2]!];
+  }
+
+  const corners: Array<[number, number, number, number, number, number]> = [
+    [0, 0, bleedPx, bleedPx, 0, 0],
+    [trim.x + nw, 0, bleedPx, bleedPx, nw - 1, 0],
+    [0, trim.y + nh, bleedPx, bleedPx, 0, nh - 1],
+    [trim.x + nw, trim.y + nh, bleedPx, bleedPx, nw - 1, nh - 1],
   ];
-  const cornerSamples: Rgb[] = [
-    samplePixel(netCanvas, 0, 0),
-    samplePixel(netCanvas, nw - 1, 0),
-    samplePixel(netCanvas, 0, nh - 1),
-    samplePixel(netCanvas, nw - 1, nh - 1),
-  ];
-  corners.forEach(([x, y, w, h], idx) => {
-    const c = cornerSamples[idx]!;
+  for (const [dx, dy, w, h, px, py] of corners) {
+    const c = sampleNetPixel(px, py);
     ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-    ctx.fillRect(x, y, w, h);
-  });
+    ctx.fillRect(dx, dy, w, h);
+  }
 
   ctx.drawImage(netCanvas, trim.x, trim.y);
   return out;
 }
 
-async function normalizeToNetCanvas(
-  imageDataUrl: string,
-  trimW: number,
-  trimH: number,
-  fit: PrintArtworkFit = "contain",
-): Promise<string> {
-  const img = await loadImage(await ensureImageDataUrl(imageDataUrl));
-  const netCanvas = document.createElement("canvas");
-  netCanvas.width = trimW;
-  netCanvas.height = trimH;
-  const ctx = netCanvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D indisponibil");
-  drawArtworkOnCanvas(ctx, img, trimW, trimH, fit);
-  return netCanvas.toDataURL("image/png");
-}
-
-/**
- * Adaugă bleed în jurul imaginii AI (zona net), fără a tăia conținutul.
- */
-export async function addAlgorithmicBleed(
+/** Pregătește canvas net (dimensiune trim) + safe zone sintetică. */
+export async function prepareNetTrimCanvas(
   imageDataUrl: string,
   layout: PrintLayoutMm,
   onStage?: (message: string) => void,
-  options?: AlgorithmicBleedOptions,
+  options?: Pick<AlgorithmicBleedOptions, "applySafeZoneFill">,
 ): Promise<string> {
-  const fit = options?.artworkFit ?? "contain";
   const px = computePrintLayoutPx(layout);
   const resolvedUrl = await ensureImageDataUrl(imageDataUrl);
-
-  if (px.bleedPx <= 0) {
-    onStage?.("Normalizez la dimensiunea netă…");
-    return normalizeToNetCanvas(resolvedUrl, px.trim.w, px.trim.h, fit);
-  }
-
-  onStage?.("Adaug bleed algoritmic (extrapolare fundal, fără tăiere)…");
+  const safePx = mmToPx(layout.safeMarginMm, layout.dpi);
+  const shouldFillSafe = options?.applySafeZoneFill === true && safePx > 0;
 
   const img = await loadImage(resolvedUrl);
   const netCanvas = document.createElement("canvas");
@@ -222,14 +255,58 @@ export async function addAlgorithmicBleed(
   netCanvas.height = px.trim.h;
   const nctx = netCanvas.getContext("2d");
   if (!nctx) throw new Error("Canvas 2D indisponibil");
-  drawArtworkOnCanvas(nctx, img, px.trim.w, px.trim.h, fit);
 
-  const trimData = nctx.getImageData(0, 0, px.trim.w, px.trim.h);
-  const bg = sampleCornerBg(trimData, px.trim.w, px.trim.h);
+  onStage?.("Normalizez la dimensiunea netă…");
+  drawAiUpscaleOutputOntoTrim(nctx, img, px.trim.w, px.trim.h);
 
-  const finalCanvas = composeBleedAroundNet(netCanvas, px, bg);
-  onStage?.("Bleed algoritmic adăugat.");
-  return finalCanvas.toDataURL("image/png");
+  if (shouldFillSafe) {
+    onStage?.("Generez fundal safe zone (extrapolare sintetică din margini)…");
+    fillSafeZoneMarginsOnCanvas(netCanvas, safePx);
+  }
+
+  return netCanvas.toDataURL("image/png");
+}
+
+function addAlgorithmicBleedFromNetUrl(
+  netDataUrl: string,
+  layout: PrintLayoutMm,
+  onStage: ((message: string) => void) | undefined,
+): Promise<string> {
+  const px = computePrintLayoutPx(layout);
+  return loadImage(netDataUrl).then((img) => {
+    const netCanvas = document.createElement("canvas");
+    netCanvas.width = px.trim.w;
+    netCanvas.height = px.trim.h;
+    const nctx = netCanvas.getContext("2d");
+    if (!nctx) throw new Error("Canvas 2D indisponibil");
+    drawAiUpscaleOutputOntoTrim(nctx, img, px.trim.w, px.trim.h);
+    const trimData = nctx.getImageData(0, 0, px.trim.w, px.trim.h);
+    const bg = sampleCornerBg(trimData, px.trim.w, px.trim.h);
+    onStage?.(`Generez bleed (${layout.bleedMm} mm) din marginea net, până la marginile fișierului…`);
+    const finalCanvas = composeBleedAroundNet(netCanvas, px, bg);
+    return finalCanvas.toDataURL("image/png");
+  });
+}
+
+/**
+ * Post-proces complet: net + safe zone + bleed algoritmic (cod).
+ */
+export async function addAlgorithmicBleed(
+  imageDataUrl: string,
+  layout: PrintLayoutMm,
+  onStage?: (message: string) => void,
+  options?: AlgorithmicBleedOptions,
+): Promise<string> {
+  const px = computePrintLayoutPx(layout);
+  const netUrl = await prepareNetTrimCanvas(imageDataUrl, layout, onStage, options);
+
+  if (px.bleedPx <= 0 || layout.bleedMm <= 0) {
+    onStage?.("Fără bleed — folosesc rezultatul la dimensiunea netă…");
+    return netUrl;
+  }
+
+  /** Fișierul final e deja totalW×totalH — fără al doilea resize (ar strica linia de tăiere). */
+  return addAlgorithmicBleedFromNetUrl(netUrl, layout, onStage);
 }
 
 /** @deprecated Folosește addAlgorithmicBleed */

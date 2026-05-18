@@ -1,5 +1,6 @@
 import { loadAiAppSettings } from "./aiAppSettings";
 import { GEMINI_IMAGE_MODELS, resolveModelFromCatalog } from "./aiModelCatalog";
+import type { GeminiImageSizeTier } from "./printGenerationProfile";
 
 const DEFAULT = "gemini-2.5-flash-image";
 
@@ -33,6 +34,8 @@ export function isImagenFastModel(modelId: string): boolean {
 }
 
 const DEFAULT_GEMINI_EDIT_MODEL = "gemini-2.5-flash-image";
+/** Recompose layout: 2.5 flash tinde să lase miniatura centrată; 3.x e mai bun la redistribuire. */
+const DEFAULT_GEMINI_RECOMPOSE_MODEL = "gemini-3.1-flash-image-preview";
 
 /** Upscale / edit cu imagine sursă — forțează Nano Banana, nu Imagen text-only. */
 export function resolveGeminiImageModelForEdit(): string {
@@ -43,4 +46,43 @@ export function resolveGeminiImageModelForEdit(): string {
     return app.geminiImageModel;
   }
   return DEFAULT_GEMINI_EDIT_MODEL;
+}
+
+/** Model dedicat recompose (layout pe format nou) — preferă 3.x față de 2.5 flash. */
+export function resolveGeminiImageModelForRecompose(): string {
+  const selected = resolveGeminiImageModel();
+  const id = selected.toLowerCase();
+  if (id.includes("3-pro-image") || id.includes("3.1-flash-image")) return selected;
+  if (isGeminiNativeImageModel(selected) && !id.includes("2.5-flash-image")) {
+    return selected;
+  }
+  return DEFAULT_GEMINI_RECOMPOSE_MODEL;
+}
+
+/** Upscale (extend + recompose): 2.5 flash dă des IMAGE_OTHER — folosește 3.1 dacă e selectat 2.5. */
+export function resolveGeminiImageModelForUpscale(
+  mode: "extend" | "recompose",
+): string {
+  if (mode === "recompose") return resolveGeminiImageModelForRecompose();
+  const selected = resolveGeminiImageModel();
+  if (selected.toLowerCase().includes("2.5-flash-image")) {
+    return DEFAULT_GEMINI_RECOMPOSE_MODEL;
+  }
+  return resolveGeminiImageModelForEdit();
+}
+
+/**
+ * Unele modele ignoră 2K sau eșuează cu IMAGE_OTHER la rezoluții mari.
+ * gemini-2.5-flash-image e stabil la 1K pentru edit pe sursă.
+ */
+export function resolveGeminiImageSizeForModel(
+  modelId: string,
+  requested: GeminiImageSizeTier,
+): GeminiImageSizeTier {
+  const id = modelId.toLowerCase();
+  if (id.includes("2.5-flash-image")) return "1K";
+  if (id.includes("flash-image") && !id.includes("3-pro")) {
+    return requested === "4K" ? "2K" : requested;
+  }
+  return requested;
 }
