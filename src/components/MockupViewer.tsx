@@ -282,24 +282,24 @@ export function MockupViewer({
       transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
       className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl flex items-center justify-center p-4 sm:p-8"
     >
-      <div className="bg-[#16191e] border border-[#2d333b] rounded-3xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
-        <div className="p-6 border-b border-[#2d333b] flex items-center justify-between">
+      <div className="bg-[#16191e] border border-[var(--border)] rounded-3xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+        <div className="p-6 border-b border-[var(--border)] flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
               <Maximize2 className="w-5 h-5 text-amber-500" />
             </div>
             <div>
               <h2 className="text-lg font-bold">Mockup Studio</h2>
-              <p className="text-xs text-[#94a3b8]">3D Visualization & AI Generation</p>
+              <p className="text-xs text-[var(--text-muted)]">3D Visualization & AI Generation</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex bg-[#0d1117] rounded-lg p-1 border border-[#2d333b]">
+            <div className="flex bg-[var(--bg-deep)] rounded-lg p-1 border border-[var(--border)]">
               <button 
                 onClick={() => setViewMode('3d')}
                 className={cn(
                   "px-4 py-1.5 rounded-md text-xs font-bold transition-all",
-                  viewMode === '3d' ? "bg-amber-500 text-black shadow-lg" : "text-[#94a3b8] hover:text-white"
+                  viewMode === '3d' ? "bg-amber-500 text-black shadow-lg" : "text-[var(--text-muted)] hover:text-white"
                 )}
               >
                 3D View
@@ -308,13 +308,13 @@ export function MockupViewer({
                 onClick={() => setViewMode('ai')}
                 className={cn(
                   "px-4 py-1.5 rounded-md text-xs font-bold transition-all",
-                  viewMode === 'ai' ? "bg-amber-500 text-black shadow-lg" : "text-[#94a3b8] hover:text-white"
+                  viewMode === 'ai' ? "bg-amber-500 text-black shadow-lg" : "text-[var(--text-muted)] hover:text-white"
                 )}
               >
                 AI Photo
               </button>
             </div>
-            <div className="w-[1px] h-8 bg-[#2d333b] mx-2" />
+            <div className="w-[1px] h-8 bg-[var(--border)] mx-2" />
             <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full transition-colors">
               <X className="w-6 h-6" />
             </button>
@@ -322,7 +322,7 @@ export function MockupViewer({
         </div>
 
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-          <div className="flex-1 bg-[#0d1117] relative flex items-center justify-center">
+          <div className="flex-1 bg-[var(--bg-deep)] relative flex items-center justify-center">
             <AnimatePresence mode="wait">
               {viewMode === '3d' ? (
                 <motion.div 
@@ -344,13 +344,13 @@ export function MockupViewer({
                         "flex items-center gap-2 text-[10px] font-bold px-3 py-1.5 rounded-full border backdrop-blur-md transition-all",
                         zundMode 
                           ? "bg-amber-500 border-amber-500 text-black shadow-lg shadow-amber-500/20" 
-                          : "bg-black/50 border-white/10 text-[#94a3b8] hover:text-white"
+                          : "bg-black/50 border-white/10 text-[var(--text-muted)] hover:text-white"
                       )}
                     >
                       <Layers className="w-3 h-3" />
                       ZÜND 2.5D VIEW {zundMode ? 'ON' : 'OFF'}
                     </button>
-                    <div className="flex items-center gap-2 text-[10px] font-bold text-[#94a3b8] bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10 w-fit">
+                    <div className="flex items-center gap-2 text-[10px] font-bold text-[var(--text-muted)] bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10 w-fit">
                       <RefreshCw className="w-3 h-3 animate-spin-slow" />
                       DRAG TO ROTATE • SCROLL TO ZOOM
                     </div>
@@ -380,10 +380,10 @@ export function MockupViewer({
                     />
                   ) : (
                     <div className="text-center space-y-4">
-                      <div className="w-20 h-20 rounded-full bg-[#1a1d23] flex items-center justify-center mx-auto">
-                        <Sparkles className="w-8 h-8 text-[#2d333b]" />
+                      <div className="w-20 h-20 rounded-full bg-[var(--card)] flex items-center justify-center mx-auto">
+                        <Sparkles className="w-8 h-8 text-[var(--border)]" />
                       </div>
-                      <p className="text-[#94a3b8]">Click "Generate AI Photo" to create a realistic scene</p>
+                      <p className="text-[var(--text-muted)]">Click "Generate AI Photo" to create a realistic scene</p>
                       {error && (
                         <p className="text-xs text-red-500 bg-red-500/10 py-2 px-4 rounded-lg">{error}</p>
                       )}
@@ -400,9 +400,9 @@ export function MockupViewer({
             </AnimatePresence>
           </div>
 
-          <div className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-[#2d333b] p-6 space-y-6 overflow-y-auto custom-scrollbar">
+          <div className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-[var(--border)] p-6 space-y-6 overflow-y-auto custom-scrollbar">
             <div className="space-y-3">
-              <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">Product Type</label>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Product Type</label>
               <div className="grid grid-cols-2 gap-2">
                 {MOCKUP_TYPES.map(m => (
                   <button
@@ -412,12 +412,12 @@ export function MockupViewer({
                       "flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-bold transition-all border",
                       type === m.id 
                         ? "bg-amber-500 border-amber-500 text-black shadow-lg shadow-amber-500/20" 
-                        : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20 hover:text-white"
+                        : "bg-[var(--card)] border-[var(--border)] text-[var(--text-muted)] hover:border-white/20 hover:text-white"
                     )}
                   >
                     <m.icon className={cn(
                       "w-4 h-4",
-                      type === m.id ? "text-black" : "text-[#94a3b8]"
+                      type === m.id ? "text-black" : "text-[var(--text-muted)]"
                     )} />
                     {m.label}
                   </button>
@@ -427,7 +427,7 @@ export function MockupViewer({
 
             {(type === 'tshirt' || type === 'hoodie') && (
               <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">Placement Zone</label>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Placement Zone</label>
                 <div className="grid grid-cols-2 gap-2">
                   {[
                     { id: 'front', label: 'Piept (Față)' },
@@ -442,7 +442,7 @@ export function MockupViewer({
                         "px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border",
                         zone === z.id 
                           ? "bg-white border-white text-black" 
-                          : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
+                          : "bg-[var(--card)] border-[var(--border)] text-[var(--text-muted)] hover:border-white/20"
                       )}
                     >
                       {z.label}
@@ -454,14 +454,14 @@ export function MockupViewer({
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8]">AI Custom Prompt</label>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">AI Custom Prompt</label>
                 <Sparkles className="w-3 h-3 text-amber-500" />
               </div>
               <textarea
                 value={customPrompt}
                 onChange={(e) => setCustomPrompt(e.target.value)}
                 placeholder="Ex: A mug on a wooden table in a cozy cafe with morning sunlight..."
-                className="w-full bg-[#0d1117] border border-[#2d333b] rounded-xl p-3 text-xs min-h-[100px] focus:outline-none focus:border-amber-500 transition-colors resize-none"
+                className="w-full bg-[var(--bg-deep)] border border-[var(--border)] rounded-xl p-3 text-xs min-h-[100px] focus:outline-none focus:border-amber-500 transition-colors resize-none"
               />
               <button
                 onClick={() => generateMockup(customPrompt)}

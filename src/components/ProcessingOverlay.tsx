@@ -37,7 +37,7 @@ export function ProcessingOverlay({
   const headline = isError ? errorMessage! : message || "Se procesează…";
 
   return (
-    <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-[#080b10]/88 px-6 backdrop-blur-md">
+    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 rounded-[inherit] bg-[var(--bg-deep)]/92 px-6 backdrop-blur-md">
       <div className="relative h-[4.5rem] w-[4.5rem]">
         {isError ? (
           <div className="absolute inset-0 flex items-center justify-center rounded-full border-2 border-red-500/40 bg-red-500/15">
@@ -65,11 +65,11 @@ export function ProcessingOverlay({
 
       {!isError && (
         <div className="w-full max-w-sm space-y-2">
-          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-[#c9d1d9]">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-[var(--text)]">
             <span>{determinate && pct !== null ? `${pct}%` : "În curs…"}</span>
-            <span className="tabular-nums text-[#8b949e]">{formatElapsed(elapsedSec)}</span>
+            <span className="tabular-nums text-[var(--text-muted)]">{formatElapsed(elapsedSec)}</span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-[#21262d] ring-1 ring-[#30363d]">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--border-strong)] ring-1 ring-[var(--border)]">
             {determinate && pct !== null ? (
               <div
                 className="h-full rounded-full bg-gradient-to-r from-amber-700 via-amber-500 to-amber-300 transition-[width] duration-500 ease-out"
@@ -94,7 +94,7 @@ export function ProcessingOverlay({
       )}
 
       {visibleLog.length > 0 && !isError && (
-        <div className="mt-1 w-full max-w-sm overflow-hidden rounded-xl border border-[#30363d] bg-[#161b22] px-3.5 py-2.5 text-left shadow-lg">
+        <div className="mt-1 w-full max-w-sm overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-overlay)] px-3.5 py-2.5 text-left shadow-lg">
           {visibleLog.map((line, i) => (
             <p
               key={`${i}-${line.slice(0, 32)}`}
@@ -102,7 +102,7 @@ export function ProcessingOverlay({
                 "py-0.5 text-[11px] leading-relaxed",
                 i === visibleLog.length - 1
                   ? "font-medium text-amber-100"
-                  : "text-[#8b949e]",
+                  : "text-[var(--text-muted)]",
               )}
             >
               <span className="mr-1.5 text-amber-500/80">›</span>

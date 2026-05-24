@@ -7,14 +7,17 @@ import {
 } from "../lib/aiKeys";
 import { loadAiAppSettings } from "../lib/aiAppSettings";
 import { aiError, aiLog } from "../lib/aiUpscaleLog";
-import { addAlgorithmicBleed, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
+import { prepareAiWorkspaceImage, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
 import { buildUpscalePrompt, type ExtendMarginBands } from "../lib/aiUpscalePrompts";
 import {
   resolveGeminiImageModel,
   resolveGeminiImageModelForUpscale,
 } from "../lib/geminiImageConfig";
 import { resolveGeminiTextModel } from "../lib/geminiTextConfig";
-import { resolvePrintGenerationProfile } from "../lib/printGenerationProfile";
+import {
+  resolveGeminiImageSizeForDpi,
+  resolvePrintGenerationProfile,
+} from "../lib/printGenerationProfile";
 import type { ProcessingStageReporter } from "../lib/processingStage";
 import { prefixProcessingReporter } from "../lib/processingStage";
 import {
@@ -254,21 +257,34 @@ async function upscaleImageGemini(
   const model = resolveGeminiImageModelForUpscale(mode);
   const { width: cw, height: ch } = pickUpscaleNetCanvasPixels(netW, netH, targetDpi);
   const aspectRatio = pickGeminiAspectRatio(cw, ch);
+  const imageSize = resolveGeminiImageSizeForDpi(targetDpi);
 
-  aiLog("gemini upscale start", { model, mode, netW, netH, targetDpi, safeMarginMm, bleedMm, canvas: { cw, ch } });
+  aiLog("gemini upscale start", {
+    model,
+    mode,
+    netW,
+    netH,
+    targetDpi,
+    imageSize,
+    safeMarginMm,
+    bleedMm,
+    canvas: { cw, ch },
+  });
 
   reporter?.stage("Gemini: pregătesc imaginea…");
   const originalDataUrl = await prepareImageForAiUpscale(imageData);
   let inputDataUrl = originalDataUrl;
   let extendBands: ExtendMarginBands = "minimal";
-  const promptCtx = { formatName, netW, netH, safeMarginMm, bleedMm };
+  const promptCtx = { formatName, netW, netH, safeMarginMm };
 
+  const composeOpts =
+    safeMarginMm > 0 ? { safeMarginMm, netWmm: netW, netHmm: netH } : undefined;
   if (mode === "recompose") {
     reporter?.stage(`Gemini: canvas recompose ${cw}×${ch}px…`);
-    inputDataUrl = await composeRecomposeCanvasForGemini(inputDataUrl, cw, ch);
+    inputDataUrl = await composeRecomposeCanvasForGemini(inputDataUrl, cw, ch, composeOpts);
   } else {
     reporter?.stage(`Gemini: canvas extend ${cw}×${ch}px…`);
-    const composed = await composeExtendOutpaintCanvas(inputDataUrl, cw, ch);
+    const composed = await composeExtendOutpaintCanvas(inputDataUrl, cw, ch, composeOpts);
     inputDataUrl = composed.dataUrl;
     extendBands = composed.bands;
   }
@@ -291,7 +307,7 @@ async function upscaleImageGemini(
     const url = await geminiImageWithQualityLoop({
       editSourceDataUrl: inputDataUrl,
       basePrompt: prompt,
-      imageConfig: { aspectRatio, imageSize: profile.geminiImageSize },
+      imageConfig: { aspectRatio, imageSize },
       critique: { mode, intentSummary: prompt, originalImageUrl: originalDataUrl },
       reporter,
       targetDpi,
@@ -442,9 +458,9 @@ export async function generativeFill(
     netHeightMm: targetHeightMm,
     bleedMm,
     safeMarginMm: 0,
-    dpi: targetDpi ?? 300,
+    dpi: targetDpi ?? 72,
   };
-  const url = await addAlgorithmicBleed(imageData, layout, reporter?.stage, {
+  const url = await prepareAiWorkspaceImage(imageData, layout, reporter?.stage, {
     applySafeZoneFill: false,
   });
 

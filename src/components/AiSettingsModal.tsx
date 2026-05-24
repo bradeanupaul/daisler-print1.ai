@@ -110,10 +110,10 @@ export function AiSettingsModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 6 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="relative flex max-h-[min(92vh,52rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2d333b] bg-[#16191e] shadow-2xl"
+            className="relative flex max-h-[min(92vh,52rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[#16191e] shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-[#2d333b] px-4 py-3">
+            <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
               <div className="flex items-center gap-2">
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15">
                   <Cpu className="h-4 w-4 text-amber-500" />
@@ -125,7 +125,7 @@ export function AiSettingsModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg p-2 text-[#94a3b8] hover:bg-white/5 hover:text-white"
+                className="rounded-lg p-2 text-[var(--text-muted)] hover:bg-white/5 hover:text-white"
                 aria-label="Închide"
               >
                 <X className="h-5 w-5" />
@@ -134,14 +134,14 @@ export function AiSettingsModal({
 
             <div className="custom-scrollbar flex-1 space-y-5 overflow-y-auto px-4 py-4">
               <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-[#94a3b8]">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
                   Stare conexiuni API
                 </p>
                 <div className="mt-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2 rounded-lg bg-[#0d1117]/80 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 rounded-lg bg-[var(--bg-deep)]/80 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <Sparkles className="h-4 w-4 shrink-0 text-amber-400" />
-                      <span className="text-xs font-medium text-[#e6edf3]">Google Gemini</span>
+                      <span className="text-xs font-medium text-[var(--text)]">Google Gemini</span>
                     </div>
                     {gOk ? (
                       <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400">
@@ -153,10 +153,10 @@ export function AiSettingsModal({
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center justify-between gap-2 rounded-lg bg-[#0d1117]/80 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 rounded-lg bg-[var(--bg-deep)]/80 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <Cpu className="h-4 w-4 shrink-0 text-sky-400" />
-                      <span className="text-xs font-medium text-[#e6edf3]">OpenAI (ChatGPT)</span>
+                      <span className="text-xs font-medium text-[var(--text)]">OpenAI (ChatGPT)</span>
                     </div>
                     {oOk ? (
                       <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400">
@@ -169,7 +169,7 @@ export function AiSettingsModal({
                     )}
                   </div>
                 </div>
-                <p className="mt-2 text-[10px] leading-relaxed text-[#64748b]">
+                <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-subtle)]">
                   Prețurile sunt orientative (USD). Facturarea reală depinde de dimensiune, pași QA OpenAI
                   și tarifele curente API.
                 </p>
@@ -239,7 +239,7 @@ export function AiSettingsModal({
               </div>
 
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-wide text-[#94a3b8]">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
                   Furnizor primar mockup (fără mod comparare)
                 </p>
                 <div className="mt-2 grid grid-cols-2 gap-2">
@@ -251,7 +251,7 @@ export function AiSettingsModal({
                       "rounded-xl border px-3 py-2.5 text-left text-xs font-semibold transition-colors",
                       primary === "gemini"
                         ? "border-amber-500 bg-amber-500/15 text-amber-400"
-                        : "border-[#2d333b] bg-[#0d1117] text-[#94a3b8] hover:border-white/20",
+                        : "border-[var(--border)] bg-[var(--bg-deep)] text-[var(--text-muted)] hover:border-white/20",
                       !gOk && "cursor-not-allowed opacity-40",
                     )}
                   >
@@ -265,7 +265,7 @@ export function AiSettingsModal({
                       "rounded-xl border px-3 py-2.5 text-left text-xs font-semibold transition-colors",
                       primary === "openai"
                         ? "border-sky-500 bg-sky-500/15 text-sky-300"
-                        : "border-[#2d333b] bg-[#0d1117] text-[#94a3b8] hover:border-white/20",
+                        : "border-[var(--border)] bg-[var(--bg-deep)] text-[var(--text-muted)] hover:border-white/20",
                       !oOk && "cursor-not-allowed opacity-40",
                     )}
                   >
@@ -278,7 +278,7 @@ export function AiSettingsModal({
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-xs font-bold text-amber-200">Debug: compară modelele</p>
-                    <p className="mt-1 text-[10px] leading-relaxed text-[#94a3b8]">
+                    <p className="mt-1 text-[10px] leading-relaxed text-[var(--text-muted)]">
                       Upscale, bleed și mockup rulează Gemini + OpenAI în paralel; alegi varianta în dialog.
                     </p>
                   </div>
@@ -288,7 +288,7 @@ export function AiSettingsModal({
                     onClick={() => setDebugDual((v) => !v)}
                     className={cn(
                       "relative h-6 w-11 shrink-0 rounded-full transition-colors",
-                      debugDual ? "bg-amber-500" : "bg-[#2d333b]",
+                      debugDual ? "bg-amber-500" : "bg-[var(--border)]",
                       (!gOk || !oOk) && "cursor-not-allowed opacity-40",
                     )}
                     aria-pressed={debugDual}
@@ -311,11 +311,11 @@ export function AiSettingsModal({
               )}
             </div>
 
-            <div className="flex flex-col gap-2 border-t border-[#2d333b] bg-[#0d1117]/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-deep)]/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <button
                 type="button"
                 onClick={onConfigureKeys}
-                className="flex items-center justify-center gap-2 rounded-lg border border-[#2d333b] px-3 py-2 text-xs font-semibold text-[#94a3b8] hover:border-amber-500/40 hover:text-white"
+                className="flex items-center justify-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--text-muted)] hover:border-amber-500/40 hover:text-white"
               >
                 <Key className="h-4 w-4" />
                 Chei API…
@@ -324,7 +324,7 @@ export function AiSettingsModal({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg border border-[#2d333b] px-4 py-2 text-xs font-semibold text-[#94a3b8] hover:bg-white/5"
+                  className="rounded-lg border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-muted)] hover:bg-white/5"
                 >
                   Anulează
                 </button>

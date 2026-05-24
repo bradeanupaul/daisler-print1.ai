@@ -1,13 +1,8 @@
-/** Safe zone + bleed în prompturi AI — doar procente, fără mm. */
+/** Safe zone în prompturi AI — procente + mm din setări, fără bleed (post-proces algoritmic). */
 
 export type SafeZonePercents = {
   insetXPct: number;
   insetYPct: number;
-};
-
-export type BleedPercents = {
-  bleedXPctPerSide: number;
-  bleedYPctPerSide: number;
 };
 
 export function computeSafeZonePercents(
@@ -23,68 +18,63 @@ export function computeSafeZonePercents(
   };
 }
 
-export function computeBleedPercents(
-  bleedMm: number,
-  netWidthMm: number,
-  netHeightMm: number,
-): BleedPercents | null {
-  if (!bleedMm || bleedMm <= 0) return null;
-  if (netWidthMm <= 0 || netHeightMm <= 0) return null;
-  return {
-    bleedXPctPerSide: Math.round((bleedMm / netWidthMm) * 1000) / 10,
-    bleedYPctPerSide: Math.round((bleedMm / netHeightMm) * 1000) / 10,
-  };
-}
-
-export type PrintMarginsPromptOpts = {
+export type PrintSafeZonePromptOpts = {
   netWidthMm: number;
   netHeightMm: number;
   safeMarginMm?: number;
-  bleedMm?: number;
+  /** Dacă input-ul include ghid vizual portocaliu (dashed). */
+  inputHasSafeGuide?: boolean;
 };
 
+const INPUT_SAFE_GUIDE = `INPUT LAYOUT GUIDE (reference only — never reproduce in OUTPUT):
+The INPUT image may show a faint dashed orange rectangle. That rectangle marks the CONTENT SAFE AREA — the only region where text, logos, faces, and CTAs may appear. Use it for layout. Do NOT draw, label, crop marks, or reproduce this guide in the OUTPUT.`;
+
 /**
- * Bloc universal pentru extend + recompose: safe zone (%) + bleed (%) — post-procesare automată.
+ * Bloc safe zone pentru extend + recompose (Gemini + OpenAI).
+ * Valorile mm/% provin din setările utilizatorului (sidebar), nu sunt fixe în cod.
  */
-export function buildPrintMarginsPromptBlock(opts: PrintMarginsPromptOpts): string {
-  const { netWidthMm, netHeightMm, safeMarginMm = 0, bleedMm = 0 } = opts;
+export function buildPrintSafeZonePromptBlock(opts: PrintSafeZonePromptOpts): string {
+  const { netWidthMm, netHeightMm, safeMarginMm = 0, inputHasSafeGuide } = opts;
   const lines: string[] = [
     `PRINT CANVAS: output = NET trim only (${netWidthMm}×${netHeightMm} mm).`,
+    "Do NOT draw percentage labels, dimension text, crop marks, magenta trim lines, or guide overlays on the image.",
   ];
 
   const safe = computeSafeZonePercents(safeMarginMm, netWidthMm, netHeightMm);
-  if (safe) {
+  if (safe && safeMarginMm > 0) {
+    if (inputHasSafeGuide) {
+      lines.push("", INPUT_SAFE_GUIDE);
+    }
     lines.push(
       "",
-      "SAFE ZONE (inset from each trim edge — use percentages, not mm):",
-      `- Left and right: ${safe.insetXPct}% of total width each (no effective content in this band).`,
-      `- Top and bottom: ${safe.insetYPct}% of total height each (no effective content in this band).`,
-      "- FORBIDDEN inside safe zone: text, typography, logos, faces, QR codes, product photos, icons, buttons, CTAs, key subjects, readable copy.",
-      "- ALLOWED in safe zone only: seamless decorative background (solid color, gradient, texture, pattern) that continues from the artwork.",
-      "- All critical content must stay inside the inner area (beyond these percentages from the trim edge).",
-    );
-  }
-
-  const bleed = computeBleedPercents(bleedMm, netWidthMm, netHeightMm);
-  if (bleed) {
-    lines.push(
+      `PRINT SAFE MARGINS (${safeMarginMm} mm inset from each trim edge on ${netWidthMm}×${netHeightMm} mm net):`,
       "",
-      "BLEED (added automatically after generation — do not draw it):",
-      `- ${bleed.bleedXPctPerSide}% of width per side and ${bleed.bleedYPctPerSide}% of height per side will be extrapolated OUTSIDE this trim image.`,
-      "- Do NOT include bleed, crop marks, registration marks, or extra canvas beyond the net trim in your output.",
+      "CONTENT SAFE AREA (inner rectangle — mandatory for all critical content):",
+      `- Inset from each trim edge: ${safe.insetXPct}% of width (${safeMarginMm} mm) on left and right; ${safe.insetYPct}% of height (${safeMarginMm} mm) on top and bottom.`,
+      "- Place ENTIRELY inside this inner area: all text, typography, logos, brand marks, faces, QR codes, product photos, icons, buttons, CTAs, key subjects, readable copy.",
+      "- Critical content must not touch, cross, or sit in the outer margin bands. Leave clear breathing room inside the safe area when possible.",
+      "",
+      "MARGIN BANDS (outer strips between trim and content safe area):",
+      "- No effective content here — only seamless decorative background (solid, gradient, texture, pattern) continuing from the artwork.",
+      "- Backgrounds and atmosphere may extend to the trim edges; critical content may NOT.",
+      "",
+      "PRIORITY: Content safe area rules override any instruction to fill the frame edge-to-edge or maximize edge placement.",
     );
   }
 
   return lines.join("\n");
 }
 
-/** @deprecated Folosește buildPrintMarginsPromptBlock */
+/** @deprecated Folosește buildPrintSafeZonePromptBlock */
+export const buildPrintMarginsPromptBlock = buildPrintSafeZonePromptBlock;
+
+/** @deprecated Folosește buildPrintSafeZonePromptBlock */
 export function buildSafeZoneInstruction(
   safeMarginMm: number,
   netWidthMm: number,
   netHeightMm: number,
 ): string {
-  return buildPrintMarginsPromptBlock({
+  return buildPrintSafeZonePromptBlock({
     netWidthMm,
     netHeightMm,
     safeMarginMm,

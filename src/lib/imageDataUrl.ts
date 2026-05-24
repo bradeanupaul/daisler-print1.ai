@@ -46,7 +46,7 @@ export async function ensureImageDataUrl(url: string): Promise<string> {
 }
 
 const AI_MIN_LONG_EDGE = 512;
-const AI_MAX_LONG_EDGE = 2048;
+const AI_MAX_LONG_EDGE = 4096;
 
 /** Pregătește sursa pentru edit/upscale: data URL valid, min 512px pe latura lungă. */
 export async function prepareImageForAiUpscale(url: string): Promise<string> {

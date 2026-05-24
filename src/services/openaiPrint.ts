@@ -29,7 +29,7 @@ import {
 } from "../lib/printGenerationProfile";
 import { prepareImageForAiUpscale } from "../lib/imageDataUrl";
 import { buildUpscalePrompt } from "../lib/aiUpscalePrompts";
-import { addAlgorithmicBleed, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
+import { prepareAiWorkspaceImage, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
 import {
   composeExtendOutpaintCanvas,
   composeRecomposeCanvasForGemini,
@@ -440,12 +440,14 @@ export async function upscaleImage(
   let editSource = prepared;
   let prompt: string;
 
-  const promptCtx = { formatName, netW, netH, safeMarginMm, bleedMm };
+  const promptCtx = { formatName, netW, netH, safeMarginMm };
   const { width: cw, height: ch } = pickUpscaleNetCanvasPixels(netW, netH, targetDpi);
 
+  const composeOpts =
+    safeMarginMm > 0 ? { safeMarginMm, netWmm: netW, netHmm: netH } : undefined;
   if (mode === "extend") {
     reporter?.stage(`OpenAI: canvas extend ${cw}×${ch}px…`);
-    const composed = await composeExtendOutpaintCanvas(prepared, cw, ch);
+    const composed = await composeExtendOutpaintCanvas(prepared, cw, ch, composeOpts);
     editSource = composed.dataUrl;
     prompt = buildUpscalePrompt("extend", {
       ...promptCtx,
@@ -455,7 +457,7 @@ export async function upscaleImage(
     });
   } else {
     reporter?.stage(`OpenAI: canvas recompose ${cw}×${ch}px…`);
-    editSource = await composeRecomposeCanvasForGemini(prepared, cw, ch);
+    editSource = await composeRecomposeCanvasForGemini(prepared, cw, ch, composeOpts);
     prompt = buildUpscalePrompt("recompose", {
       ...promptCtx,
       canvasPxW: cw,
@@ -489,9 +491,9 @@ export async function generativeFill(
     netHeightMm: targetHeightMm,
     bleedMm,
     safeMarginMm: 0,
-    dpi: targetDpi ?? 300,
+    dpi: targetDpi ?? 72,
   };
-  return addAlgorithmicBleed(imageData, layout, reporter?.stage, {
+  return prepareAiWorkspaceImage(imageData, layout, reporter?.stage, {
     applySafeZoneFill: false,
   });
 }

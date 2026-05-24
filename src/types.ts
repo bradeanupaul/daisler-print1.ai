@@ -61,6 +61,8 @@ export interface ProcessingSettings {
   addCutLine: boolean;
   cutLineColor: string;
   showGuides: boolean;
+  showBleedGuide: boolean;
+  showSafeGuide: boolean;
   showAIOverlays: boolean;
   simulateCMYK: boolean;
   keepVector: boolean;

@@ -50,19 +50,19 @@ export function FileHistoryDrawer({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: -12 }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className="fixed inset-0 z-[45] flex min-h-0 flex-col gap-3 overflow-hidden border-0 bg-[#0d1117]/98 p-4 backdrop-blur-sm lg:relative lg:inset-auto lg:z-auto lg:max-h-full lg:min-h-0 lg:w-[min(100%,17.5rem)] lg:max-w-[17.5rem] lg:shrink-0 lg:overflow-y-auto lg:border-r lg:border-[var(--border)] lg:bg-transparent lg:p-0 lg:pr-4"
+      className="fixed inset-0 z-[45] flex min-h-0 flex-col gap-3 overflow-hidden border-0 bg-[var(--bg-deep)]/98 p-4 backdrop-blur-sm lg:relative lg:inset-auto lg:z-auto lg:max-h-full lg:min-h-0 lg:w-[min(100%,17.5rem)] lg:max-w-[17.5rem] lg:shrink-0 lg:overflow-y-auto lg:border-r lg:border-[var(--border)] lg:bg-transparent lg:p-0 lg:pr-4"
     >
       <motion.div
         initial={{ opacity: 0, y: -6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="flex items-center justify-between gap-3 border-b border-[#2d333b] pb-4 lg:border-0 lg:pb-0"
+        className="flex items-center justify-between gap-3 border-b border-[var(--border)] pb-4 lg:border-0 lg:pb-0"
       >
         <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--text-muted)]">Istoric fișiere</h3>
         <button
           type="button"
           onClick={onClose}
-          className="rounded-lg p-2 text-[#94a3b8] hover:bg-white/5 hover:text-white"
+          className="rounded-lg p-2 text-[var(--text-muted)] hover:bg-white/5 hover:text-white"
           aria-label="Închide istoricul"
         >
           <X className="h-5 w-5 lg:h-4 lg:w-4" />
@@ -93,7 +93,7 @@ export function FileHistoryDrawer({
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                  className="rounded-xl border border-[#2d333b] bg-[#1a1d23]"
+                  className="rounded-xl border border-[var(--border)] bg-[var(--card)]"
                 >
                   <button
                     type="button"
@@ -102,7 +102,7 @@ export function FileHistoryDrawer({
                   >
                     <ChevronDown
                       className={cn(
-                        "mt-0.5 h-4 w-4 shrink-0 text-[#64748b] transition-transform",
+                        "mt-0.5 h-4 w-4 shrink-0 text-[var(--text-subtle)] transition-transform",
                         isOpen && "rotate-180",
                       )}
                     />
@@ -112,14 +112,14 @@ export function FileHistoryDrawer({
                       className="min-w-0 flex-1"
                     >
                       <p className="truncate text-xs font-bold text-white">{group.title}</p>
-                      <p className="mt-0.5 text-[10px] text-[#94a3b8]">
+                      <p className="mt-0.5 text-[10px] text-[var(--text-muted)]">
                         {groupKindLabel(group.kind)} · {group.assets.length} fișier
                         {group.assets.length === 1 ? "" : "e"} · {updated}
                       </p>
                     </motion.div>
                   </button>
                   {isOpen && group.assets.length > 0 && (
-                    <ul className="space-y-1 border-t border-[#2d333b] px-2 py-2">
+                    <ul className="space-y-1 border-t border-[var(--border)] px-2 py-2">
                       {[...group.assets]
                         .sort(
                           (a, b) =>
@@ -151,8 +151,8 @@ export function FileHistoryDrawer({
                                 onClick={() => onSelectAsset?.(group, asset)}
                                 className="min-w-0 flex-1 text-left disabled:cursor-wait disabled:opacity-60"
                               >
-                                <p className="truncate font-medium text-[#e6edf3]">{asset.file_name}</p>
-                                <p className="text-[#64748b]">{sourceKindLabel(asset.source_kind)}</p>
+                                <p className="truncate font-medium text-[var(--text)]">{asset.file_name}</p>
+                                <p className="text-[var(--text-subtle)]">{sourceKindLabel(asset.source_kind)}</p>
                               </button>
                               <motion.div
                                 initial={false}
@@ -164,7 +164,7 @@ export function FileHistoryDrawer({
                                     type="button"
                                     disabled={isLoading}
                                     onClick={() => onSelectAsset(group, asset)}
-                                    className="rounded-md border border-[#2d333b] px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-400 hover:border-amber-500/40 disabled:opacity-50"
+                                    className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-400 hover:border-amber-500/40 disabled:opacity-50"
                                   >
                                     {isLoading ? (
                                       <Loader2 className="h-3 w-3 animate-spin" />
@@ -179,7 +179,7 @@ export function FileHistoryDrawer({
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     onClick={(e) => e.stopPropagation()}
-                                    className="rounded-md border border-[#2d333b] p-1 text-[#94a3b8] hover:border-amber-500/40 hover:text-amber-400"
+                                    className="rounded-md border border-[var(--border)] p-1 text-[var(--text-muted)] hover:border-amber-500/40 hover:text-amber-400"
                                     title="Deschide în tab nou"
                                     aria-label="Deschide în tab nou"
                                   >
@@ -204,13 +204,13 @@ export function FileHistoryDrawer({
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-              className="space-y-1 rounded-xl border border-[#2d333b] bg-[#1a1d23] p-3"
+              className="space-y-1 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3"
             >
               <p className="truncate text-xs font-bold">{item.fileName}</p>
               <motion.div
                 initial={false}
                 animate={{ opacity: 1 }}
-                className="flex items-center justify-between text-[10px] text-[#94a3b8]"
+                className="flex items-center justify-between text-[10px] text-[var(--text-muted)]"
               >
                 <span>{item.format}</span>
                 <span>

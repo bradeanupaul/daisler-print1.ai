@@ -68,7 +68,7 @@ function ImageWithRefineColumn(props: {
         {label}
       </p>
 
-      <div className="relative min-h-[12rem] overflow-hidden rounded-lg border border-[var(--border)] bg-[#0d1117]">
+      <div className="relative min-h-[12rem] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-deep)]">
         {displayUrl ? (
           <>
             <img

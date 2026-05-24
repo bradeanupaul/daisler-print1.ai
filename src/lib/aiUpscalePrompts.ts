@@ -2,7 +2,7 @@
  * Prompturi upscale — structură unică: TASK + ALLOWED + PRESERVATION + CONSTRAINTS + QUALITY.
  * Tier: short | premium (env AI_UPSCALE_PROMPT_TIER, implicit premium).
  */
-import { buildPrintMarginsPromptBlock } from "./printSafeZonePrompt";
+import { buildPrintSafeZonePromptBlock } from "./printSafeZonePrompt";
 
 export type UpscalePromptMode = "extend" | "recompose";
 export type UpscalePromptTier = "short" | "premium";
@@ -17,7 +17,6 @@ export type UpscaleTargetContext = {
   canvasPxH?: number;
   bands?: ExtendMarginBands;
   safeMarginMm?: number;
-  bleedMm?: number;
 };
 
 export function resolveUpscalePromptTier(): UpscalePromptTier {
@@ -56,13 +55,13 @@ function targetBlock(ctx: UpscaleTargetContext): string {
   } else if (ctx.bands === "left-right") {
     block += "\nEmpty bands to fill: left and right (center artwork unchanged).";
   }
-  const margins = buildPrintMarginsPromptBlock({
+  const safeBlock = buildPrintSafeZonePromptBlock({
     netWidthMm: ctx.netW,
     netHeightMm: ctx.netH,
     safeMarginMm: ctx.safeMarginMm,
-    bleedMm: ctx.bleedMm,
+    inputHasSafeGuide: (ctx.safeMarginMm ?? 0) > 0,
   });
-  if (margins) block += `\n\n${margins}`;
+  if (safeBlock) block += `\n\n${safeBlock}`;
   return block;
 }
 
@@ -70,7 +69,7 @@ const NEGATIVE_EXTEND = `STRICT CONSTRAINTS:
 No new subjects. No duplicated objects. No redesign. No style changes. No altered proportions inside the original frame. No warped geometry. No modified text. No inconsistent lighting. No letterboxing or white bars.`;
 
 const NEGATIVE_RECOMPOSE = `STRICT CONSTRAINTS:
-No generated elements. No deletion of existing elements. No content replacement. No new graphics. No hallucinated details. No typography changes. No visual redesign of individual elements. No style drift. No letterboxing or inner white margins inside the trim — the design must fill the frame.`;
+No generated elements. No deletion of existing elements. No content replacement. No new graphics. No hallucinated details. No typography changes. No visual redesign of individual elements. No style drift. No letterboxing or inner white margins inside the trim. No reproducing input layout guides (dashed orange rectangle) in the output.`;
 
 function buildExtendShort(ctx: UpscaleTargetContext): string {
   return `${targetBlock(ctx)}
@@ -122,7 +121,7 @@ QUALITY TARGET: The result should appear as if the original image was always cre
 }
 
 const RECOMPOSE_FRAME_FILL = `
-FRAME FILL (mandatory for print trim): The output must completely fill the pixel frame edge to edge — no white margins inside the trim area, no letterboxing, no small centered design with empty bands on the sides or top/bottom. Scale and spread the layout to use the full width and height of the frame. Critical text/logos stay inside the safe zone from the margins block; backgrounds and visuals may extend to the trim edges.`;
+FRAME FILL (print trim — backgrounds only at edges): The output must fill the pixel frame with no letterboxing or inner white margins. Scale and balance the layout for the target aspect ratio. Decorative backgrounds, textures, gradients, and atmosphere may extend to all trim edges. ALL critical content (text, logos, faces, CTAs, key subjects) must remain fully inside the CONTENT SAFE AREA from the margins block — never in the outer margin bands. Content safe area rules take priority over edge-to-edge placement.`;
 
 function buildRecomposeShort(ctx: UpscaleTargetContext): string {
   return `${targetBlock(ctx)}

@@ -1,16 +1,18 @@
 /**
- * Post-proces AI upscale: imaginea modelului → strict în zona NET (linie tăiere),
- * apoi bleed algoritmic doar în afara net-ului, până la marginile fișierului (fără AI).
+ * Post-proces după AI: imaginea modelului rămâne neschimbată (fără scalare / cover / contain).
+ * Se aplică doar bleed algoritmic din ultimul rând/coloană de pixeli de pe margini.
  */
 import { ensureImageDataUrl } from "./imageDataUrl";
 import { fillSafeZoneMarginsOnCanvas } from "./printSafeZoneFill";
+import { pickUpscaleNetCanvasPixels } from "./upscaleCompose";
 import { PRINT_FORMATS, type ProcessingSettings } from "../types";
 
 export type PrintArtworkFit = "contain" | "cover";
 
 export type AlgorithmicBleedOptions = {
   /**
-   * Umple safe zone cu extrapolare sintetică (rare). Implicit false — safe zone vine din prompt la AI.
+   * Umple benzile exterioare (în afara content safe area) cu fundal extrapolat.
+   * Implicit true când există safe margin — acoperă conținut plasat greșit de model.
    */
   applySafeZoneFill?: boolean;
 };
@@ -38,17 +40,34 @@ export function mmToPx(mm: number, dpi: number): number {
   return Math.max(1, Math.round((mm / 25.4) * dpi));
 }
 
-/** Dimensiuni pixel pentru net (trim) sau total (net + bleed). */
+/**
+ * Bleed în pixeli proporțional cu bitmap-ul net (nu mm×DPI tipar).
+ * Necesar după normalizare la rezoluția AI (1000/1500/2000 pe latura lungă).
+ */
+export function bleedPxForNetImage(
+  netWpx: number,
+  netHpx: number,
+  layout: PrintLayoutMm,
+): number {
+  if (layout.bleedMm <= 0 || !netWpx || !netHpx) return 0;
+  const pxPerMm = Math.min(
+    netWpx / Math.max(layout.netWidthMm, 1e-6),
+    netHpx / Math.max(layout.netHeightMm, 1e-6),
+  );
+  return Math.max(1, Math.round(layout.bleedMm * pxPerMm));
+}
+
+/** Dimensiuni pixel pentru net (trim) sau total (net + bleed) după setările de tipar (mm × DPI). */
 export function getLayoutPixelSize(
   layout: PrintLayoutMm,
   target: "net" | "total",
 ): { width: number; height: number } {
-  const px = computePrintLayoutPx(layout);
+  const px = computePrintLayoutPxFromMm(layout);
   if (target === "net") return { width: px.trim.w, height: px.trim.h };
   return { width: px.totalW, height: px.totalH };
 }
 
-/** Plasează imaginea la dimensiunile țintă (contain = tot conținutul în cadru; cover = umple, poate tăia). */
+/** Plasează imaginea la dimensiunile țintă (utilitar separat de fluxul AI). */
 export async function fitImageToLayoutPixels(
   imageDataUrl: string,
   layout: PrintLayoutMm,
@@ -72,22 +91,29 @@ export function getPrintLayoutFromSettings(settings: ProcessingSettings): PrintL
     settings.formatId === "custom" ? settings.customWidth || 90 : fmt?.width || 90;
   const netH =
     settings.formatId === "custom" ? settings.customHeight || 50 : fmt?.height || 50;
+  const safeMargin =
+    settings.addSafeZone === false ? 0 : Math.max(0, settings.safeMargin ?? 3);
   return {
     netWidthMm: netW,
     netHeightMm: netH,
     bleedMm: settings.bleed ?? 3,
-    safeMarginMm: settings.safeMargin ?? 3,
-    dpi: settings.dpi ?? 300,
+    safeMarginMm: safeMargin,
+    dpi: settings.dpi ?? 72,
   };
 }
 
-function computePrintLayoutPx(layout: PrintLayoutMm): PrintLayoutPx {
+function computePrintLayoutPxFromMm(layout: PrintLayoutMm): PrintLayoutPx {
   const bleedPx = mmToPx(layout.bleedMm, layout.dpi);
   const trimW = mmToPx(layout.netWidthMm, layout.dpi);
   const trimH = mmToPx(layout.netHeightMm, layout.dpi);
-  const totalW = trimW + 2 * bleedPx;
-  const totalH = trimH + 2 * bleedPx;
-  const trim: Rect = { x: bleedPx, y: bleedPx, w: trimW, h: trimH };
+  return computeBleedLayoutPx(trimW, trimH, bleedPx);
+}
+
+/** Layout bleed pentru o zonă net de dimensiuni reale (ex. pixelii returnați de model). */
+function computeBleedLayoutPx(netW: number, netH: number, bleedPx: number): PrintLayoutPx {
+  const totalW = netW + 2 * bleedPx;
+  const totalH = netH + 2 * bleedPx;
+  const trim: Rect = { x: bleedPx, y: bleedPx, w: netW, h: netH };
   return { totalW, totalH, bleedPx, trim };
 }
 
@@ -121,32 +147,79 @@ function drawArtworkOnCanvas(
   ctx.drawImage(img, dx, dy, dw, dh);
 }
 
-/** După upscale: 1:1 dacă modelul returnează exact net-ul; altfel o singură scalare uniformă dacă raportul coincide; cover doar la discrepanță mare. */
-function drawAiUpscaleOutputOntoTrim(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  trimW: number,
-  trimH: number,
-) {
-  const iw = img.naturalWidth || img.width;
-  const ih = img.naturalHeight || img.height;
+/**
+ * Pas 2: forțează output-ul modelului la exact targetW×targetH px
+ * (72→1000 · 150→1500 · 300→2000 pe latura lungă, apoi raport format).
+ */
+export async function normalizeImageDataUrlToExactPixels(
+  imageDataUrl: string,
+  targetW: number,
+  targetH: number,
+): Promise<string> {
+  const resolved = await ensureImageDataUrl(imageDataUrl);
+  const img = await loadImage(resolved);
+  const nw = img.naturalWidth || img.width;
+  const nh = img.naturalHeight || img.height;
+  if (!nw || !nh) return resolved;
+  if (nw === targetW && nh === targetH) return resolved;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D indisponibil");
+
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, trimW, trimH);
-  if (!iw || !ih) return;
-  if (iw === trimW && ih === trimH) {
-    ctx.drawImage(img, 0, 0);
-    return;
-  }
-  const targetR = trimW / trimH;
-  const sourceR = iw / ih;
-  const ratioClose = Math.abs(targetR - sourceR) / Math.max(targetR, sourceR, 1e-9) < 0.002;
+  ctx.fillRect(0, 0, targetW, targetH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  const targetR = targetW / targetH;
+  const sourceR = nw / nh;
+  const ratioClose =
+    Math.abs(targetR - sourceR) / Math.max(targetR, sourceR, 1e-9) < 0.002;
+
   if (ratioClose) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(img, 0, 0, iw, ih, 0, 0, trimW, trimH);
-    return;
+    ctx.drawImage(img, 0, 0, nw, nh, 0, 0, targetW, targetH);
+  } else {
+    const scale = Math.max(targetW / nw, targetH / nh);
+    const dw = nw * scale;
+    const dh = nh * scale;
+    ctx.drawImage(img, (targetW - dw) / 2, (targetH - dh) / 2, dw, dh);
   }
-  drawArtworkOnCanvas(ctx, img, trimW, trimH, "cover");
+
+  return canvas.toDataURL("image/png");
+}
+
+/** Normalizează la pixelii țintă AI, apoi bleed algoritmic. */
+export async function prepareAiWorkspaceImage(
+  imageDataUrl: string,
+  layout: PrintLayoutMm,
+  onStage?: (message: string) => void,
+  options?: AlgorithmicBleedOptions,
+): Promise<string> {
+  const { width: targetW, height: targetH } = pickUpscaleNetCanvasPixels(
+    layout.netWidthMm,
+    layout.netHeightMm,
+    layout.dpi,
+  );
+  onStage?.(`Normalizez la ${targetW}×${targetH}px (țintă AI pentru ${layout.dpi} DPI)…`);
+  const netUrl = await normalizeImageDataUrlToExactPixels(imageDataUrl, targetW, targetH);
+  return addAlgorithmicBleed(netUrl, layout, onStage, options);
+}
+
+/** Copiază imaginea la rezoluția ei nativă, fără scalare. */
+function buildNetCanvasFromImage(img: HTMLImageElement): HTMLCanvasElement {
+  const nw = img.naturalWidth || img.width;
+  const nh = img.naturalHeight || img.height;
+  if (!nw || !nh) throw new Error("Dimensiuni imagine invalide");
+  const netCanvas = document.createElement("canvas");
+  netCanvas.width = nw;
+  netCanvas.height = nh;
+  const ctx = netCanvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D indisponibil");
+  ctx.drawImage(img, 0, 0);
+  return netCanvas;
 }
 
 function sampleCornerBg(imageData: ImageData, w: number, h: number): Rgb {
@@ -237,59 +310,8 @@ function composeBleedAroundNet(
   return out;
 }
 
-/** Pregătește canvas net (dimensiune trim) + safe zone sintetică. */
-export async function prepareNetTrimCanvas(
-  imageDataUrl: string,
-  layout: PrintLayoutMm,
-  onStage?: (message: string) => void,
-  options?: Pick<AlgorithmicBleedOptions, "applySafeZoneFill">,
-): Promise<string> {
-  const px = computePrintLayoutPx(layout);
-  const resolvedUrl = await ensureImageDataUrl(imageDataUrl);
-  const safePx = mmToPx(layout.safeMarginMm, layout.dpi);
-  const shouldFillSafe = options?.applySafeZoneFill === true && safePx > 0;
-
-  const img = await loadImage(resolvedUrl);
-  const netCanvas = document.createElement("canvas");
-  netCanvas.width = px.trim.w;
-  netCanvas.height = px.trim.h;
-  const nctx = netCanvas.getContext("2d");
-  if (!nctx) throw new Error("Canvas 2D indisponibil");
-
-  onStage?.("Normalizez la dimensiunea netă…");
-  drawAiUpscaleOutputOntoTrim(nctx, img, px.trim.w, px.trim.h);
-
-  if (shouldFillSafe) {
-    onStage?.("Generez fundal safe zone (extrapolare sintetică din margini)…");
-    fillSafeZoneMarginsOnCanvas(netCanvas, safePx);
-  }
-
-  return netCanvas.toDataURL("image/png");
-}
-
-function addAlgorithmicBleedFromNetUrl(
-  netDataUrl: string,
-  layout: PrintLayoutMm,
-  onStage: ((message: string) => void) | undefined,
-): Promise<string> {
-  const px = computePrintLayoutPx(layout);
-  return loadImage(netDataUrl).then((img) => {
-    const netCanvas = document.createElement("canvas");
-    netCanvas.width = px.trim.w;
-    netCanvas.height = px.trim.h;
-    const nctx = netCanvas.getContext("2d");
-    if (!nctx) throw new Error("Canvas 2D indisponibil");
-    drawAiUpscaleOutputOntoTrim(nctx, img, px.trim.w, px.trim.h);
-    const trimData = nctx.getImageData(0, 0, px.trim.w, px.trim.h);
-    const bg = sampleCornerBg(trimData, px.trim.w, px.trim.h);
-    onStage?.(`Generez bleed (${layout.bleedMm} mm) din marginea net, până la marginile fișierului…`);
-    const finalCanvas = composeBleedAroundNet(netCanvas, px, bg);
-    return finalCanvas.toDataURL("image/png");
-  });
-}
-
 /**
- * Post-proces complet: net + safe zone + bleed algoritmic (cod).
+ * Imaginea modelului rămâne la pixelii returnați; opțional bleed algoritmic în jur.
  */
 export async function addAlgorithmicBleed(
   imageDataUrl: string,
@@ -297,16 +319,99 @@ export async function addAlgorithmicBleed(
   onStage?: (message: string) => void,
   options?: AlgorithmicBleedOptions,
 ): Promise<string> {
-  const px = computePrintLayoutPx(layout);
-  const netUrl = await prepareNetTrimCanvas(imageDataUrl, layout, onStage, options);
+  const resolvedUrl = await ensureImageDataUrl(imageDataUrl);
+  const img = await loadImage(resolvedUrl);
+  const nw = img.naturalWidth || img.width;
+  const nh = img.naturalHeight || img.height;
+  const bleedPx = bleedPxForNetImage(nw, nh, layout);
 
-  if (px.bleedPx <= 0 || layout.bleedMm <= 0) {
-    onStage?.("Fără bleed — folosesc rezultatul la dimensiunea netă…");
-    return netUrl;
+  if (bleedPx <= 0 || layout.bleedMm <= 0) {
+    onStage?.("Fără bleed — păstrez imaginea AI neschimbată.");
+    return resolvedUrl;
   }
 
-  /** Fișierul final e deja totalW×totalH — fără al doilea resize (ar strica linia de tăiere). */
-  return addAlgorithmicBleedFromNetUrl(netUrl, layout, onStage);
+  onStage?.("Pregătesc imaginea AI (fără scalare)…");
+  const netCanvas = buildNetCanvasFromImage(img);
+
+  const pxPerMm = Math.min(
+    nw / Math.max(layout.netWidthMm, 1e-6),
+    nh / Math.max(layout.netHeightMm, 1e-6),
+  );
+  const safePx =
+    layout.safeMarginMm > 0 ? Math.max(1, Math.round(layout.safeMarginMm * pxPerMm)) : 0;
+  const shouldFillSafe =
+    options?.applySafeZoneFill !== false && safePx > 0;
+  if (shouldFillSafe) {
+    onStage?.("Generez fundal safe zone (extrapolare sintetică din margini)…");
+    fillSafeZoneMarginsOnCanvas(netCanvas, safePx);
+  }
+
+  const bleedLayout = computeBleedLayoutPx(nw, nh, bleedPx);
+  const trimData = netCanvas.getContext("2d")!.getImageData(0, 0, nw, nh);
+  const bg = sampleCornerBg(trimData, nw, nh);
+  onStage?.(`Generez bleed (${layout.bleedMm} mm ≈ ${bleedPx}px/latură) din marginea imaginii…`);
+  const finalCanvas = composeBleedAroundNet(netCanvas, bleedLayout, bg);
+  return finalCanvas.toDataURL("image/png");
+}
+
+/**
+ * Export / PDF: mărește uniform doar dacă imaginea e sub pixelii tipar (mm × DPI).
+ * Nu micșorează output-ul AI dacă e deja mai mare decât ținta.
+ */
+export async function upscaleDataUrlToPrintPixels(
+  imageDataUrl: string,
+  layout: PrintLayoutMm,
+  target: "net" | "total" = "total",
+  onStage?: (message: string) => void,
+): Promise<string> {
+  const { width: targetW, height: targetH } = getLayoutPixelSize(layout, target);
+  const resolved = await ensureImageDataUrl(imageDataUrl);
+  const img = await loadImage(resolved);
+  const nw = img.naturalWidth || img.width;
+  const nh = img.naturalHeight || img.height;
+  if (!nw || !nh) return resolved;
+
+  if (nw >= targetW && nh >= targetH) {
+    return resolved;
+  }
+
+  onStage?.(`Export la ${targetW}×${targetH}px (${layout.dpi} DPI)…`);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D indisponibil");
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, targetW, targetH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  const scale = Math.max(targetW / nw, targetH / nh);
+  const dw = nw * scale;
+  const dh = nh * scale;
+  const dx = (targetW - dw) / 2;
+  const dy = (targetH - dh) / 2;
+  ctx.drawImage(img, dx, dy, dw, dh);
+  return canvas.toDataURL("image/png");
+}
+
+/** DPI efectiv al bitmap-ului față de zona net (mm). */
+export function computeEffectiveDpiForImage(
+  imgWidthPx: number,
+  imgHeightPx: number,
+  layout: PrintLayoutMm,
+): number {
+  if (!layout.netWidthMm || !layout.netHeightMm) return 0;
+  const totalWmm = layout.netWidthMm + 2 * layout.bleedMm;
+  const totalHmm = layout.netHeightMm + 2 * layout.bleedMm;
+  const netWpx = imgWidthPx * (layout.netWidthMm / Math.max(totalWmm, 1e-6));
+  const netHpx = imgHeightPx * (layout.netHeightMm / Math.max(totalHmm, 1e-6));
+  return Math.min(
+    netWpx / (layout.netWidthMm / 25.4),
+    netHpx / (layout.netHeightMm / 25.4),
+  );
 }
 
 /** @deprecated Folosește addAlgorithmicBleed */

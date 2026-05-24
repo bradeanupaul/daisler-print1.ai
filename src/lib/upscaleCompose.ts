@@ -1,38 +1,73 @@
-import { resolvePrintGenerationProfile } from "./printGenerationProfile";
+import {
+  resolveAiGenerationLongEdgePx,
+  resolvePrintGenerationProfile,
+} from "./printGenerationProfile";
 import type { ExtendMarginBands } from "./aiUpscalePrompts";
 
 export type { ExtendMarginBands };
 
-const DEFAULT_MAX_UPSCALE_CANVAS_EDGE = 4096;
+export type ComposeAiCanvasOpts = {
+  safeMarginMm?: number;
+  netWmm?: number;
+  netHmm?: number;
+};
 
-function mmToTrimPx(mm: number, dpi: number): number {
-  return Math.max(1, Math.round((mm / 25.4) * dpi));
+/** Ghid vizual pe INPUT (nu apare în output) — dreptunghi portocaliu punctat. */
+export function drawInputSafeZoneGuide(
+  ctx: CanvasRenderingContext2D,
+  canvasW: number,
+  canvasH: number,
+  safeMarginMm: number,
+  netWmm: number,
+  netHmm: number,
+): void {
+  if (safeMarginMm <= 0 || netWmm <= 0 || netHmm <= 0) return;
+  const insetX = Math.max(1, Math.round((safeMarginMm / netWmm) * canvasW));
+  const insetY = Math.max(1, Math.round((safeMarginMm / netHmm) * canvasH));
+  if (insetX * 2 >= canvasW || insetY * 2 >= canvasH) return;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(251, 146, 60, 0.62)";
+  ctx.lineWidth = Math.max(1, Math.round(canvasW / 420));
+  const dash = ctx.lineWidth * 5;
+  ctx.setLineDash([dash, dash * 0.75]);
+  ctx.strokeRect(insetX + 0.5, insetY + 0.5, canvasW - 2 * insetX - 1, canvasH - 2 * insetY - 1);
+  ctx.restore();
+}
+
+function applyInputSafeGuideIfNeeded(
+  ctx: CanvasRenderingContext2D,
+  canvasW: number,
+  canvasH: number,
+  opts?: ComposeAiCanvasOpts,
+): void {
+  const safe = opts?.safeMarginMm ?? 0;
+  const netW = opts?.netWmm ?? 0;
+  const netH = opts?.netHmm ?? 0;
+  if (safe > 0 && netW > 0 && netH > 0) {
+    drawInputSafeZoneGuide(ctx, canvasW, canvasH, safe, netW, netH);
+  }
 }
 
 /**
- * Pixeli pentru zona NET trimisă la upscale: aceeași formulă ca la tipar (mm × DPI),
- * cu scară uniformă dacă depășește plafonul — raportul rămâne cel al formatului (ex. 16:9).
+ * Canvas trimis la AI: latura lungă după DPI (72→1000 · 150→1500 · 300→2000 px),
+ * raport exact mmW:mmH.
  */
 export function pickUpscaleNetCanvasPixels(
   netWmm: number,
   netHmm: number,
   targetDpi?: number,
-  maxEdgePx = DEFAULT_MAX_UPSCALE_CANVAS_EDGE,
 ): { width: number; height: number } {
-  const profile = resolvePrintGenerationProfile(targetDpi);
-  const dpi = profile.targetDpi;
-  const fallback = profile.extendCanvasLongEdge;
+  const long = resolveAiGenerationLongEdgePx(targetDpi);
   if (netWmm <= 0 || netHmm <= 0) {
+    const fallback = resolvePrintGenerationProfile(targetDpi).extendCanvasLongEdge;
     return { width: fallback, height: fallback };
   }
-  let w = mmToTrimPx(netWmm, dpi);
-  let h = mmToTrimPx(netHmm, dpi);
-  if (w > maxEdgePx || h > maxEdgePx) {
-    const s = Math.min(maxEdgePx / w, maxEdgePx / h, 1);
-    w = Math.max(1, Math.round(w * s));
-    h = Math.max(1, Math.round(h * s));
+  const r = netWmm / netHmm;
+  if (r >= 1) {
+    return { width: long, height: Math.max(1, Math.round(long / r)) };
   }
-  return { width: w, height: h };
+  return { width: Math.max(1, Math.round(long * r)), height: long };
 }
 
 function aspectsClose(a: number, b: number, tolerance = 0.035): boolean {
@@ -60,6 +95,7 @@ export async function composeExtendOutpaintCanvas(
   sourceDataUrl: string,
   canvasW: number,
   canvasH: number,
+  opts?: ComposeAiCanvasOpts,
 ): Promise<{ dataUrl: string; bands: ExtendMarginBands }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -108,6 +144,7 @@ export async function composeExtendOutpaintCanvas(
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvasW, canvasH);
       ctx.drawImage(img, dx, dy, dw, dh);
+      applyInputSafeGuideIfNeeded(ctx, canvasW, canvasH, opts);
 
       resolve({
         dataUrl: canvas.toDataURL("image/png"),
@@ -134,6 +171,7 @@ export async function composeRecomposeCanvasForGemini(
   sourceDataUrl: string,
   canvasW: number,
   canvasH: number,
+  opts?: ComposeAiCanvasOpts,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -161,6 +199,7 @@ export async function composeRecomposeCanvasForGemini(
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvasW, canvasH);
       ctx.drawImage(img, dx, dy, dw, dh);
+      applyInputSafeGuideIfNeeded(ctx, canvasW, canvasH, opts);
       resolve(canvas.toDataURL("image/png"));
     };
     img.onerror = () => reject(new Error("Încărcare imagine eșuată"));

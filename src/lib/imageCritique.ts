@@ -19,16 +19,15 @@ const EXTEND_QA = `
 EXTEND / OUTPAINT QA (compare ORIGINAL vs OUTPUT):
 - Inside the original artwork boundaries: same layout, subjects, text, logos — untouched (preserve composition).
 - Only outer/new areas may change: seamless environment continuation.
-- If GENERATION PROMPT defines SAFE ZONE percentages: no text, logos, faces, or key subjects in those outer bands (decorative background only).
-- If GENERATION PROMPT defines BLEED: OUTPUT must be net trim only — no bleed drawn by the model.
-- REGENERATE if: center artwork moved, rescaled, or cropped; new subjects/text/logos; duplicated or tiled poster; flat empty bands where background should continue; garbled or missing text from ORIGINAL; critical content inside safe zone bands; whole-image uniform stretch instead of outpaint; clear style or lighting break at seams.
+- If GENERATION PROMPT defines CONTENT SAFE AREA / margin bands: ALL text, logos, faces, CTAs, and key subjects must lie fully inside the inner safe rectangle — none in the outer margin strips (only decorative background allowed there).
+- REGENERATE if: center artwork moved, rescaled, or cropped; new subjects/text/logos; duplicated or tiled poster; flat empty bands where background should continue; garbled or missing text from ORIGINAL; any critical content in outer margin bands or crossing the content safe boundary; whole-image uniform stretch instead of outpaint; clear style or lighting break at seams; orange dashed guide reproduced in OUTPUT.
 `;
 
 const RECOMPOSE_QA = `
 RECOMPOSE QA (compare ORIGINAL vs OUTPUT):
 - Composition-only: OUTPUT uses only elements from ORIGINAL (layout may change).
-- If GENERATION PROMPT defines SAFE ZONE percentages: no text, logos, faces, or key subjects in those outer bands.
-- REGENERATE if: new objects, icons, photos, or readable text not in ORIGINAL; major elements from ORIGINAL missing; uniform whole-image stretch with no real layout change; garbled or cropped text; changed typography content; redesigned individual elements; critical content inside safe zone bands; style drift.
+- If GENERATION PROMPT defines CONTENT SAFE AREA / margin bands: ALL text, logos, faces, CTAs, and key subjects must lie fully inside the inner safe rectangle — none in outer margin strips.
+- REGENERATE if: new objects, icons, photos, or readable text not in ORIGINAL; major elements from ORIGINAL missing; uniform whole-image stretch with no real layout change; garbled or cropped text; changed typography content; redesigned individual elements; any critical content in outer margin bands or crossing the content safe boundary; style drift; orange dashed guide reproduced in OUTPUT.
 `;
 
 export function buildImageCritiqueInstruction(request: ImageCritiqueRequest): string {
@@ -53,7 +52,7 @@ Return ONE JSON object only:
   "promptAddendum": string
 }
 
-Set shouldRegenerate true only for clear violations of MODE rules or the GENERATION PROMPT (missing ORIGINAL elements, forbidden new content, wrong operation type, broken text). Minor softness or slight color shift: false.
+Set shouldRegenerate true for clear violations of MODE rules or the GENERATION PROMPT (missing ORIGINAL elements, forbidden new content, wrong operation type, broken text, critical content outside content safe area). Minor softness or slight color shift: false. Content safe area violations are never minor.
 
 issues: short English bullets naming specific defects (max 6).
 promptAddendum: concise English fix instructions for the NEXT image generation (max 600 characters). Empty string if shouldRegenerate is false.`;

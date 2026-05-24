@@ -26,8 +26,8 @@ export function AiModelPicker({
 
   return (
     <div>
-      <p className="text-[10px] font-bold uppercase tracking-wide text-[#94a3b8]">{title}</p>
-      {hint && <p className="mt-1 text-[10px] leading-relaxed text-[#64748b]">{hint}</p>}
+      <p className="text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">{title}</p>
+      {hint && <p className="mt-1 text-[10px] leading-relaxed text-[var(--text-subtle)]">{hint}</p>}
       <div className="mt-2 space-y-1.5">
         {models.map((m) => {
           const on = value === m.id;
@@ -39,20 +39,20 @@ export function AiModelPicker({
               onClick={() => onChange(m.id)}
               className={cn(
                 "flex w-full flex-col gap-0.5 rounded-xl border px-3 py-2.5 text-left transition-colors",
-                on ? selectedRing : "border-[#2d333b] bg-[#0d1117] hover:border-white/15",
+                on ? selectedRing : "border-[var(--border)] bg-[var(--bg-deep)] hover:border-white/15",
                 disabled && "cursor-not-allowed opacity-40",
               )}
             >
               <div className="flex w-full items-center justify-between gap-2">
-                <span className={cn("text-xs font-semibold", on ? "text-white" : "text-[#e6edf3]")}>
+                <span className={cn("text-xs font-semibold", on ? "text-white" : "text-[var(--text)]")}>
                   {m.label}
                 </span>
                 <span className={cn("shrink-0 text-[10px] font-semibold", tierColor(m.tier))}>
                   {m.costHint.split("·")[0]?.trim()}
                 </span>
               </div>
-              <p className="text-[10px] leading-snug text-[#8b949e]">{m.description}</p>
-              <p className="text-[10px] font-medium text-[#64748b]">{m.costHint}</p>
+              <p className="text-[10px] leading-snug text-[var(--text-muted)]">{m.description}</p>
+              <p className="text-[10px] font-medium text-[var(--text-subtle)]">{m.costHint}</p>
               <code className="mt-0.5 text-[9px] text-[#484f58]">{m.id}</code>
             </button>
           );

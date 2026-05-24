@@ -108,10 +108,10 @@ export default function App() {
 
   if (!isAuthReady) {
     return (
-      <div className="flex h-dvh min-h-0 flex-1 flex-col items-center justify-center bg-[#0d1117]">
+      <div className="flex h-dvh min-h-0 flex-1 flex-col items-center justify-center bg-[var(--bg)]">
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-amber-500/20 border-t-amber-500 rounded-full animate-spin" />
-          <p className="text-sm font-medium text-[#94a3b8] animate-pulse">Initializing print1.ai...</p>
+          <p className="text-sm font-medium text-[var(--text-muted)] animate-pulse">Initializing print1.ai...</p>
         </div>
       </div>
     );

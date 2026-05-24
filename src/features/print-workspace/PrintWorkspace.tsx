@@ -25,7 +25,6 @@ import {
   Box,
   Key,
   Crop as CropIcon,
-  Maximize2,
   ArrowUpCircle,
   Layers,
   Zap,
@@ -61,7 +60,6 @@ import { hasAnyAiKeyConfigured } from '../../lib/aiKeys';
 import { 
   PRINT_FORMATS, 
   MOCKUP_TYPES, 
-  IMPOSITION_SHEETS,
   ProcessingSettings, 
   MockupType,
   HistoryItem,
@@ -103,10 +101,18 @@ import { reportAiError } from '../../lib/reportAiError';
 import { aiError, aiLog } from '../../lib/aiUpscaleLog';
 import { ensureImageDataUrl } from '../../lib/imageDataUrl';
 import {
-  addAlgorithmicBleed,
+  computeEffectiveDpiForImage,
   getPrintLayoutFromSettings,
+  prepareAiWorkspaceImage,
+  upscaleDataUrlToPrintPixels,
 } from '../../lib/printLayoutPostProcess';
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
+import { pickUpscaleNetCanvasPixels } from '../../lib/upscaleCompose';
+
+const resolveTargetDpi = (dpi: ProcessingSettings['dpi']) => dpi ?? DEFAULT_PRINT_SETTINGS.dpi ?? 72;
+
+/** Dezactivat temporar — panou Agent AI + Verificare calitate */
+const ENABLE_AGENT_QUALITY_PANEL = false;
 
 const DROPDOWN_PANEL = {
   initial: { opacity: 0, y: -10, scale: 0.96 },
@@ -160,7 +166,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const [showMockup, setShowMockup] = useState(false);
   const [mockupType, setMockupType] = useState<MockupType>('hoodie');
   const [showHistory, setShowHistory] = useState(false);
-  const [rightToolsOpen, setRightToolsOpen] = useState(true);
+  const [rightToolsOpen, setRightToolsOpen] = useState(ENABLE_AGENT_QUALITY_PANEL);
   const [rightToolsTab, setRightToolsTab] = useState<"agent" | "quality">("agent");
   const [hasKey, setHasKey] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -177,24 +183,38 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const mockupMenuRef = useRef<HTMLDivElement>(null);
   const [formatPickerOpen, setFormatPickerOpen] = useState(false);
   const formatPickerRef = useRef<HTMLDivElement>(null);
-  const [sheetPickerOpen, setSheetPickerOpen] = useState(false);
-  const sheetPickerRef = useRef<HTMLDivElement>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
   type WorkspaceImageDualFlow = "upscale" | "generative_fill";
   const [dualImagePicker, setDualImagePicker] = useState<{
     flow: WorkspaceImageDualFlow;
     dual: Extract<UpscaleGenerationResult, { kind: "dual" }>;
   } | null>(null);
-  const [aiUpscaleMenuOpen, setAiUpscaleMenuOpen] = useState(false);
-  const aiUpscaleMenuRef = useRef<HTMLDivElement>(null);
-
   const [settings, setSettings] = useState<ProcessingSettings>({
     ...DEFAULT_PRINT_SETTINGS,
   });
   const [canvasRevision, setCanvasRevision] = useState(0);
+  const [canvasIntrinsicPx, setCanvasIntrinsicPx] = useState<{ width: number; height: number } | null>(
+    null,
+  );
   const canvasDisplayUrl = processedUrl || previewUrl;
 
   const imgRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    if (!canvasDisplayUrl) {
+      setCanvasIntrinsicPx(null);
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      setCanvasIntrinsicPx({
+        width: probe.naturalWidth || probe.width,
+        height: probe.naturalHeight || probe.height,
+      });
+    };
+    probe.onerror = () => setCanvasIntrinsicPx(null);
+    probe.src = canvasDisplayUrl;
+  }, [canvasDisplayUrl, canvasRevision]);
   const agentInputRef = useRef<HTMLInputElement>(null);
   const activeHistoryGroupIdRef = useRef<string | null>(null);
   const lastAiGenerationUsageRef = useRef<AiUsageSummary | null>(null);
@@ -204,18 +224,16 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   }, []);
 
   useEffect(() => {
-    if (!exportMenuOpen && !mockupMenuOpen && !formatPickerOpen && !sheetPickerOpen && !aiUpscaleMenuOpen) return;
+    if (!exportMenuOpen && !mockupMenuOpen && !formatPickerOpen) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
       if (exportMenuRef.current && !exportMenuRef.current.contains(t)) setExportMenuOpen(false);
       if (mockupMenuRef.current && !mockupMenuRef.current.contains(t)) setMockupMenuOpen(false);
       if (formatPickerRef.current && !formatPickerRef.current.contains(t)) setFormatPickerOpen(false);
-      if (sheetPickerRef.current && !sheetPickerRef.current.contains(t)) setSheetPickerOpen(false);
-      if (aiUpscaleMenuRef.current && !aiUpscaleMenuRef.current.contains(t)) setAiUpscaleMenuOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [exportMenuOpen, mockupMenuOpen, formatPickerOpen, sheetPickerOpen, aiUpscaleMenuOpen]);
+  }, [exportMenuOpen, mockupMenuOpen, formatPickerOpen]);
   const handleSelectKey = () => {
     const key = prompt(
       "Introdu cheia API:\n- OpenAI (începe cu sk-…, ex. sk-proj-…)\n- sau Google Gemini (începe cu AIza…)"
@@ -335,7 +353,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
             const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
             const targetW = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
             const targetH = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
-            const targetDpi = settings.dpi || 300;
+            const targetDpi = resolveTargetDpi(settings.dpi);
             
             const effectiveDpi = Math.min(
               img.width / (targetW / 25.4),
@@ -496,11 +514,11 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       if (!url) return null;
       const layout = getPrintLayoutFromSettings(options?.layoutSettings ?? settings);
       try {
-        return await addAlgorithmicBleed(url, layout, (m) => processing.stage(m), {
+        return await prepareAiWorkspaceImage(url, layout, (m) => processing.stage(m), {
           applySafeZoneFill: options?.applySafeZoneFill,
         });
       } catch (e) {
-        console.warn("addAlgorithmicBleed failed:", e);
+        console.warn("prepareAiWorkspaceImage failed:", e);
         toast.warning("Bleed algoritmic eșuat — folosesc imaginea AI.");
         try {
           return await ensureImageDataUrl(url);
@@ -520,7 +538,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       if (!url) return null;
       const layoutSettings: ProcessingSettings = {
         ...settings,
-        showGuides: true,
+        showBleedGuide: true,
+        showSafeGuide: true,
         addSafeZone: true,
         bleed: settings.bleed ?? 3,
         safeMargin: settings.safeMargin ?? 3,
@@ -535,22 +554,20 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         dataUrl = url;
       }
 
-      setProcessedUrl(dataUrl);
-      setPreviewUrl(dataUrl);
-      setCanvasRevision((n) => n + 1);
-      aiLog("AI result on canvas (before bleed)", { len: dataUrl.length });
+      aiLog("AI result received", { len: dataUrl.length });
 
-      processing.stage("Plasez AI în zona net, apoi generez bleed până la marginile fișierului…");
+      processing.stage("Normalizez la rezoluția AI + bleed…");
+      const useSafeFill =
+        layoutSettings.addSafeZone !== false && (layoutSettings.safeMargin ?? 3) > 0;
       const finalized = await applyAlgorithmicBleed(dataUrl, {
         layoutSettings,
-        applySafeZoneFill: false,
+        applySafeZoneFill: useSafeFill,
       });
-      if (finalized) {
-        setProcessedUrl(finalized);
-        setPreviewUrl(finalized);
-        setCanvasRevision((n) => n + 1);
-        aiLog("finalize with algorithmic bleed", { len: finalized.length });
-      }
+      const displayUrl = finalized ?? dataUrl;
+      setProcessedUrl(displayUrl);
+      setPreviewUrl(displayUrl);
+      setCanvasRevision((n) => n + 1);
+      aiLog("finalize workspace image", { len: displayUrl.length });
       setIsUpscaleNeeded(false);
       if (meta?.historyLabel) {
         void persistProcessedToHistory(dataUrl, "upscale", `${meta.historyLabel}_ai_raw`, {
@@ -613,8 +630,15 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         }
       }
 
-      if (processedUrl && (file.type.includes('image') || file.name.toLowerCase().endsWith('.svg')) && processedUrl.startsWith('data:')) {
-        const response = await fetch(processedUrl);
+      if (processedUrl && (file.type.includes('image') || file.name.toLowerCase().endsWith('.svg'))) {
+        const layout = getPrintLayoutFromSettings(settings);
+        const printReadyUrl = await upscaleDataUrlToPrintPixels(
+          processedUrl,
+          layout,
+          "total",
+          (m) => processing.stage(m),
+        );
+        const response = await fetch(printReadyUrl);
         bufferToUse = await response.arrayBuffer();
       }
 
@@ -625,7 +649,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         height,
         settings.bleed || 0,
         settings.safeMargin || 0,
-        settings.dpi || 300,
+        resolveTargetDpi(settings.dpi),
         settings.addCutLine,
         settings.addSafeZone,
         settings.cutLineColor,
@@ -686,7 +710,14 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       return;
     }
     try {
-      const res = await fetch(processedUrl);
+      const layout = getPrintLayoutFromSettings(settings);
+      const printReadyUrl = await upscaleDataUrlToPrintPixels(
+        processedUrl,
+        layout,
+        "total",
+        (m) => processing.stage(m),
+      );
+      const res = await fetch(printReadyUrl);
       const blob = await res.blob();
       const mime = blob.type || "image/png";
       const ext =
@@ -786,7 +817,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         finalCols,
         spacing,
         settings.bleed || 0,
-        settings.dpi || 300,
+        resolveTargetDpi(settings.dpi),
         settings.showCropMarks,
         currentPage - 1
       );
@@ -826,7 +857,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const height = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
 
       processing.stage("Trimit imaginea la analiza AI…");
-      const result = await analyzePrintQuality(urlToAnalyze, settings.dpi || 300, width, height);
+      const result = await analyzePrintQuality(urlToAnalyze, resolveTargetDpi(settings.dpi), width, height);
       processing.stage("Procesez rezultatul analizei…");
       if (!result) throw new Error("Analysis failed");
       
@@ -965,7 +996,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
               effectiveFormatId === "custom"
                 ? settings.customHeight || 50
                 : currentFormat?.height || 50;
-            const targetDpi = settings.dpi || 300;
+            const targetDpi = resolveTargetDpi(settings.dpi);
             const effectiveDpi = Math.min(
               img.width / (targetW / 25.4),
               img.height / (targetH / 25.4),
@@ -1019,8 +1050,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const netW = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
       const netH = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
       const formatName = currentFormat?.name || 'Custom Format';
-      const targetDpi = settings.dpi || 300;
-      const safeMargin = settings.safeMargin ?? 3;
+      const targetDpi = resolveTargetDpi(settings.dpi);
+      const safeMargin = settings.addSafeZone ? (settings.safeMargin ?? 3) : 0;
       const bleedMm = settings.bleed ?? 3;
 
       const result = await upscaleImage(
@@ -1173,7 +1204,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   };
 
   const refineWorkspaceGemini = async (imageUrl: string, instruction: string) =>
-    refineGeminiImageFromPrompt(imageUrl, instruction, processing.getReporter(), settings.dpi || 300);
+    refineGeminiImageFromPrompt(imageUrl, instruction, processing.getReporter(), resolveTargetDpi(settings.dpi));
 
   const refineWorkspaceOpenai = async (imageUrl: string, instruction: string) => {
     const currentFormat = PRINT_FORMATS.find((f) => f.id === settings.formatId);
@@ -1187,31 +1218,35 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       w,
       h,
       processing.getReporter(),
-      settings.dpi || 300,
+      resolveTargetDpi(settings.dpi),
     );
   };
 
   const handleGenerativeFill = async () => {
     const source = processedUrl || previewUrl;
     if (!source) return;
-    if (!(settings.bleed && settings.bleed > 0)) {
+    const bleedMm = settings.bleed ?? 3;
+    if (bleedMm <= 0) {
       toast.error("Setează bleed (mm) înainte de a genera marginile.");
       return;
     }
     processing.begin("Adaug bleed algoritmic…");
-    const toastId = toast.loading(`Adaug bleed (${settings.bleed} mm pe latură)…`);
+    const toastId = toast.loading(`Adaug bleed (${bleedMm} mm pe latură)…`);
     try {
       const layoutSettings: ProcessingSettings = {
         ...settings,
-        showGuides: true,
+        showBleedGuide: true,
+        showSafeGuide: true,
         addSafeZone: true,
         bleed: settings.bleed ?? 3,
         safeMargin: settings.safeMargin ?? 3,
       };
       setSettings(layoutSettings);
+      const useSafeFill =
+        layoutSettings.addSafeZone !== false && (layoutSettings.safeMargin ?? 3) > 0;
       const finalized = await applyAlgorithmicBleed(source, {
         layoutSettings,
-        applySafeZoneFill: false,
+        applySafeZoneFill: useSafeFill,
       });
       if (!finalized) throw new Error("EMPTY_RESPONSE");
       setProcessedUrl(finalized);
@@ -1308,24 +1343,24 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       {/* Aside — pe mobil: drawer peste conținut; pe desktop: coloană fixă */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex min-h-0 w-[min(20rem,calc(100vw-1.25rem))] max-w-[18rem] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-elevated)] shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-20 lg:h-full lg:w-72 lg:max-w-none lg:translate-x-0 lg:shadow-none",
+          "fixed inset-y-0 left-0 z-40 flex min-h-0 w-[min(20rem,calc(100vw-1.25rem))] max-w-[18rem] shrink-0 flex-col app-sidebar border-r border-[var(--border-subtle)] shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-20 lg:h-full lg:w-[15.5rem] lg:max-w-none lg:translate-x-0 lg:shadow-none",
           mobileSidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-3 sm:px-4">
+        <div className="flex items-center justify-between px-4 py-3">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500 shadow-md shadow-amber-500/15">
-              <Printer className="h-5 w-5 text-black" />
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/90">
+              <Printer className="h-4 w-4 text-black" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-bold tracking-tight text-white sm:text-base">print1.ai</h1>
-              <p className="text-[9px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Pregătire fișier pentru tipar</p>
+              <h1 className="truncate text-[13px] font-semibold tracking-tight text-white">print1.ai</h1>
+              <p className="text-[11px] text-[var(--text-subtle)]">Pregătire tipar</p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"
-              className="rounded-lg p-2 text-[#94a3b8] hover:bg-white/5 hover:text-white lg:hidden"
+              className="rounded-lg p-2 text-[var(--text-muted)] hover:bg-white/5 hover:text-white lg:hidden"
               aria-label="Închide setările"
               onClick={() => setMobileSidebarOpen(false)}
             >
@@ -1335,7 +1370,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
               <button
                 type="button"
                 onClick={logOut}
-                className="rounded-lg p-2 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-red-400"
+                className="rounded-lg p-2 text-[var(--text-muted)] transition-colors hover:bg-white/5 hover:text-red-400"
                 aria-label="Deconectare"
               >
                 <LogOut className="h-4 w-4" />
@@ -1346,11 +1381,10 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                   setExportMenuOpen(false);
                   setMockupMenuOpen(false);
                   setFormatPickerOpen(false);
-                  setSheetPickerOpen(false);
                   setShowAiSettings(true);
                   setMobileSidebarOpen(false);
                 }}
-                className="rounded-lg p-2 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-amber-400"
+                className="rounded-lg p-2 text-[var(--text-muted)] transition-colors hover:bg-white/5 hover:text-amber-400"
                 title="Setări AI — conexiuni API, model mockup"
                 aria-label="Setări AI"
               >
@@ -1360,51 +1394,32 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           </div>
         </div>
 
-        <div className="custom-scrollbar flex-1 space-y-8 overflow-y-auto p-4 sm:p-5">
+        <div className="custom-scrollbar flex-1 overflow-y-auto px-4 py-3 sm:px-4">
           {/* Section: File Settings */}
-          <section className="space-y-3">
-            <div className="mb-2 flex items-center gap-2">
-              <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-                <Settings className="h-3 w-3 shrink-0" />
-                <span className="truncate">Format & tehnic</span>
-              </div>
-            </div>
+          <section className="sidebar-section space-y-2.5">
+            <p className="sidebar-kicker">Format</p>
             
-            <div className="space-y-2.5">
+            <div className="space-y-2">
               <div ref={formatPickerRef} className="relative">
                   <button
                     type="button"
                     aria-expanded={formatPickerOpen}
                     aria-haspopup="listbox"
                     onClick={() => {
-                      setSheetPickerOpen(false);
                       setFormatPickerOpen((o) => !o);
                     }}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-sm transition-all",
-                      formatPickerOpen
-                        ? "border-amber-500/50 bg-[#1a1d23] shadow-[0_0_0_1px_rgba(245,158,11,0.15)]"
-                        : "border-[#2d333b] bg-[#1a1d23] hover:border-white/15 hover:bg-[#1e2229]",
-                    )}
+                    className="sidebar-select"
+                    data-open={formatPickerOpen ? "true" : "false"}
                   >
-                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                      <div
-                        className={cn(
-                          "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
-                          formatPickerOpen ? "border-amber-500/30 bg-amber-500/10" : "border-[#2d333b] bg-[#0d1117]/80",
-                        )}
-                      >
-                        <Printer className="h-4 w-4 text-amber-500/90" aria-hidden />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate font-medium text-white">
+                    <div className="min-w-0 flex-1 text-left">
+                        <p className="truncate text-[13px] font-medium text-white">
                           {(() => {
                             const f = PRINT_FORMATS.find((x) => x.id === settings.formatId);
                             if (!f) return "Format";
                             return f.id === "custom" ? "Dimensiuni personalizate" : f.name;
                           })()}
                         </p>
-                        <p className="truncate text-[11px] text-[#94a3b8]">
+                        <p className="truncate text-[11px] text-[var(--text-muted)]">
                           {settings.formatId === "custom"
                             ? settings.customWidth != null && settings.customHeight != null
                               ? `${settings.customWidth}×${settings.customHeight} mm`
@@ -1415,9 +1430,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               })()}
                         </p>
                       </div>
-                    </div>
                     <ChevronDown
-                      className={cn("h-4 w-4 shrink-0 text-[#94a3b8] transition-transform", formatPickerOpen && "rotate-180")}
+                      className={cn("h-4 w-4 shrink-0 text-[var(--text-muted)] transition-transform", formatPickerOpen && "rotate-180")}
                       aria-hidden
                     />
                   </button>
@@ -1429,13 +1443,13 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         animate={DROPDOWN_PANEL.animate}
                         exit={DROPDOWN_PANEL.exit}
                         transition={DROPDOWN_PANEL.transition}
-                        className="absolute left-0 right-0 top-[calc(100%+6px)] z-[70] overflow-hidden rounded-xl border border-[#2d333b] bg-[#161b22] shadow-xl shadow-black/40 ring-1 ring-black/20"
+                        className="absolute left-0 right-0 top-[calc(100%+6px)] z-[70] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-overlay)] shadow-xl shadow-black/40 ring-1 ring-black/20"
                         role="listbox"
                         aria-label="Alege formatul paginii"
                       >
-                      <div className="border-b border-[#2d333b]/80 bg-[#0d1117]/50 px-3 py-2">
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-[#94a3b8]">Dimensiune pagină</p>
-                        <p className="text-[10px] text-[#64748b]">Preseturi tipografice + personalizat</p>
+                      <div className="border-b border-[var(--border)]/80 bg-[var(--bg-deep)]/50 px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Dimensiune pagină</p>
+                        <p className="text-[10px] text-[var(--text-subtle)]">Preseturi tipografice + personalizat</p>
                       </div>
                       <div className="custom-scrollbar max-h-[min(55vh,16rem)] overflow-y-auto p-1.5">
                         {PRINT_FORMATS.map((f) => {
@@ -1464,16 +1478,16 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               <span
                                 className={cn(
                                   "flex min-h-8 min-w-8 max-w-[3.5rem] shrink-0 items-center justify-center rounded-md px-1 text-[8px] font-bold leading-tight tabular-nums",
-                                  selected ? "bg-amber-500 text-black" : "bg-[#21262d] text-[#94a3b8]",
+                                  selected ? "bg-amber-500 text-black" : "bg-[var(--border-strong)] text-[var(--text-muted)]",
                                 )}
                               >
                                 {isCustom ? "±" : `${f.width}×${f.height}`}
                               </span>
                               <span className="min-w-0 flex-1">
-                                <span className="block truncate text-[13px] font-medium text-[#e6edf3]">
+                                <span className="block truncate text-[13px] font-medium text-[var(--text)]">
                                   {isCustom ? "Dimensiuni personalizate" : f.name}
                                 </span>
-                                <span className="block truncate text-[11px] text-[#64748b]">{dimLabel}</span>
+                                <span className="block truncate text-[11px] text-[var(--text-subtle)]">{dimLabel}</span>
                               </span>
                               {selected && <Check className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />}
                             </button>
@@ -1488,21 +1502,21 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
               {settings.formatId === 'custom' && (
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Width (mm)</label>
+                    <label className="sidebar-label">Width (mm)</label>
                     <input 
                       type="number" 
                       value={settings.customWidth === null ? '' : settings.customWidth}
                       onChange={(e) => setSettings({...settings, customWidth: e.target.value === '' ? null : Number(e.target.value)})}
-                      className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                      className="workspace-input"
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Height (mm)</label>
+                    <label className="sidebar-label">Height (mm)</label>
                     <input 
                       type="number" 
                       value={settings.customHeight === null ? '' : settings.customHeight}
                       onChange={(e) => setSettings({...settings, customHeight: e.target.value === '' ? null : Number(e.target.value)})}
-                      className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                      className="workspace-input"
                     />
                   </div>
                 </div>
@@ -1510,45 +1524,41 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
               <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1.5 group relative">
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1 flex items-center gap-1">
+                  <label className="sidebar-label">
                     Bleed (mm)
                     <span className="cursor-help text-amber-500/50 hover:text-amber-500">?</span>
                   </label>
-                  <div className="absolute left-0 -top-12 w-48 p-2 bg-[#1a1d23] border border-[#2d333b] rounded-lg text-[9px] text-[#94a3b8] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                  <div className="absolute left-0 -top-12 w-48 p-2 bg-[var(--card)] border border-[var(--border)] rounded-lg text-[9px] text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
                     Bleed is generated OUTSIDE the net format. E.g. 100x100mm + 3mm bleed = 106x106mm total output.
                   </div>
                   <input 
                     type="number" 
                     value={settings.bleed === null ? '' : settings.bleed}
                     onChange={(e) => setSettings({...settings, bleed: e.target.value === '' ? null : Number(e.target.value)})}
-                    className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                    className="workspace-input"
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Safe (mm)</label>
+                  <label className="sidebar-label">Safe (mm)</label>
                   <input 
                     type="number" 
                     value={settings.safeMargin === null ? '' : settings.safeMargin}
                     onChange={(e) => setSettings({...settings, safeMargin: e.target.value === '' ? null : Number(e.target.value)})}
-                    className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                    className="workspace-input"
                   />
                 </div>
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Resolution (DPI)</label>
+                <label className="sidebar-label">Resolution (DPI)</label>
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2">
                     {[72, 150, 300].map(d => (
                       <button
                         key={d}
                         onClick={() => setSettings({...settings, dpi: d})}
-                        className={cn(
-                          "flex-1 py-2 rounded-xl text-xs font-bold transition-all border",
-                          settings.dpi === d 
-                            ? "bg-amber-500 border-amber-500 text-black" 
-                            : "bg-[#1a1d23] border-[#2d333b] text-[#94a3b8] hover:border-white/20"
-                        )}
+                        className="dpi-pill"
+                        data-active={resolveTargetDpi(settings.dpi) === d ? "true" : "false"}
                       >
                         {d}
                       </button>
@@ -1560,294 +1570,88 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                       placeholder="Custom DPI..."
                       value={settings.dpi === null ? '' : settings.dpi}
                       onChange={(e) => setSettings({...settings, dpi: e.target.value === '' ? null : Number(e.target.value)})}
-                      className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
+                      className="workspace-input"
                     />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-[#94a3b8]">DPI</span>
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-[var(--text-muted)]">DPI</span>
                   </div>
                 </div>
               </div>
             </div>
           </section>
 
-          {/* Section: Imposition Settings */}
-          {PRINT_FORMATS.find(f => f.id === settings.formatId)?.isPaper && (
-            <section className="space-y-4 border-t border-[var(--border)]/60 pt-6">
-              <div className="mb-2 flex items-center gap-2">
-                <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-                  <LayoutGrid className="h-3 w-3 shrink-0" />
-                  <span className="truncate">Imposiție pe coală</span>
-                </div>
-              </div>
-              
-              <div className="space-y-3">
-                <div className="flex items-center justify-between p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className={cn("w-4 h-4", settings.autoAIUpscale ? "text-amber-500" : "text-[#94a3b8]")} />
-                    <span className="text-sm font-medium text-white">Auto AI Upscale</span>
-                  </div>
-                  <button 
-                    onClick={() => setSettings({...settings, autoAIUpscale: !settings.autoAIUpscale})}
-                    className={cn(
-                      "w-10 h-5 rounded-full transition-colors relative",
-                      settings.autoAIUpscale ? "bg-amber-500" : "bg-[#2d333b]"
-                    )}
-                  >
-                    <div className={cn(
-                      "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
-                      settings.autoAIUpscale ? "right-1" : "left-1"
-                    )} />
-                  </button>
-                </div>
+          <section className="sidebar-section space-y-2">
+            <p className="sidebar-kicker">AI</p>
+                <button
+                  type="button"
+                  onClick={() => void handleUpscale("extend")}
+                  disabled={isProcessing || !canvasDisplayUrl}
+                  className="sidebar-action"
+                  data-active={(settings.upscaleMode ?? "extend") === "extend" ? "true" : "false"}
+                >
+                  <ArrowUpCircle className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  AI Extend
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleUpscale("recompose")}
+                  disabled={isProcessing || !canvasDisplayUrl}
+                  className="sidebar-action"
+                  data-active={settings.upscaleMode === "recompose" ? "true" : "false"}
+                >
+                  <Layers className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  AI Recompose
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleGenerativeFill()}
+                  disabled={isProcessing || !canvasDisplayUrl}
+                  className="sidebar-action" data-active="false"
+                >
+                  <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  AI Bleed
+                </button>
+          </section>
 
-                <div className="space-y-1.5 pt-2">
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                    Dimensiune coală
-                  </label>
-                  <div ref={sheetPickerRef} className="relative">
-                    <button
-                      type="button"
-                      aria-expanded={sheetPickerOpen}
-                      aria-haspopup="listbox"
-                      onClick={() => {
-                        setFormatPickerOpen(false);
-                        setSheetPickerOpen((o) => !o);
-                      }}
-                      className={cn(
-                        "flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-sm transition-all",
-                        sheetPickerOpen
-                          ? "border-amber-500/50 bg-[#1a1d23] shadow-[0_0_0_1px_rgba(245,158,11,0.15)]"
-                          : "border-[#2d333b] bg-[#1a1d23] hover:border-white/15 hover:bg-[#1e2229]",
-                      )}
-                    >
-                      <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                        <div
-                          className={cn(
-                            "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
-                            sheetPickerOpen ? "border-amber-500/30 bg-amber-500/10" : "border-[#2d333b] bg-[#0d1117]/80",
-                          )}
-                        >
-                          <LayoutGrid className="h-4 w-4 text-amber-500/90" aria-hidden />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium text-white">
-                            {(() => {
-                              const sid = settings.impositionSheetId ?? "a4";
-                              const s = IMPOSITION_SHEETS.find((x) => x.id === sid);
-                              return s?.name ?? "Coală";
-                            })()}
-                          </p>
-                          <p className="truncate text-[11px] text-[#94a3b8]">
-                            {(() => {
-                              const sid = settings.impositionSheetId ?? "a4";
-                              const s = IMPOSITION_SHEETS.find((x) => x.id === sid);
-                              if (!s) return "";
-                              if (s.id === "custom") {
-                                const w = settings.customSheetWidth;
-                                const h = settings.customSheetHeight;
-                                if (w != null && h != null && w > 0 && h > 0) {
-                                  return `${w}×${h} mm`;
-                                }
-                                return "Dimensiuni la alegere (mm)";
-                              }
-                              return `${s.width}×${s.height} mm`;
-                            })()}
-                          </p>
-                        </div>
-                      </div>
-                      <ChevronDown
-                        className={cn("h-4 w-4 shrink-0 text-[#94a3b8] transition-transform", sheetPickerOpen && "rotate-180")}
-                        aria-hidden
-                      />
-                    </button>
-                    <AnimatePresence>
-                      {sheetPickerOpen && (
-                        <motion.div
-                          key="sheet-picker"
-                          initial={DROPDOWN_PANEL.initial}
-                          animate={DROPDOWN_PANEL.animate}
-                          exit={DROPDOWN_PANEL.exit}
-                          transition={DROPDOWN_PANEL.transition}
-                          className="absolute left-0 right-0 top-[calc(100%+6px)] z-[70] overflow-hidden rounded-xl border border-[#2d333b] bg-[#161b22] shadow-xl shadow-black/40 ring-1 ring-black/20"
-                          role="listbox"
-                          aria-label="Alege dimensiunea coalei"
-                        >
-                          <div className="border-b border-[#2d333b]/80 bg-[#0d1117]/50 px-3 py-2">
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-[#94a3b8]">Coală tipografică</p>
-                            <p className="text-[10px] text-[#64748b]">Preseturi standard + coală personalizată</p>
-                          </div>
-                          <div className="custom-scrollbar max-h-[min(55vh,14rem)] overflow-y-auto p-1.5">
-                            {IMPOSITION_SHEETS.map((s) => {
-                              const sid = settings.impositionSheetId ?? "a4";
-                              const selected = sid === s.id;
-                              const isCustom = s.id === "custom";
-                              const dimLabel = isCustom
-                                ? "Lățime și înălțime coală la alegere"
-                                : `${s.width}×${s.height} mm`;
-                              return (
-                                <button
-                                  key={s.id}
-                                  type="button"
-                                  role="option"
-                                  aria-selected={selected}
-                                  onClick={() => {
-                                    setSettings({
-                                      ...settings,
-                                      impositionSheetId: s.id,
-                                      customSheetWidth: s.width || 0,
-                                      customSheetHeight: s.height || 0,
-                                    });
-                                    setSheetPickerOpen(false);
-                                  }}
-                                  className={cn(
-                                    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                                    selected
-                                      ? "bg-amber-500/15 ring-1 ring-amber-500/25"
-                                      : "hover:bg-white/[0.04]",
-                                  )}
-                                >
-                                  <span
-                                    className={cn(
-                                      "flex min-h-8 min-w-8 max-w-[4rem] shrink-0 items-center justify-center rounded-md px-1 text-[8px] font-bold leading-tight tabular-nums",
-                                      selected ? "bg-amber-500 text-black" : "bg-[#21262d] text-[#94a3b8]",
-                                    )}
-                                  >
-                                    {isCustom ? "±" : `${s.width}×${s.height}`}
-                                  </span>
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block truncate text-[13px] font-medium text-[#e6edf3]">{s.name}</span>
-                                    <span className="block truncate text-[11px] text-[#64748b]">{dimLabel}</span>
-                                  </span>
-                                  {selected && <Check className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                  {(settings.impositionSheetId ?? "a4") === "custom" && (
-                    <div className="grid grid-cols-2 gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                          Lățime coală (mm)
-                        </label>
-                        <input
-                          type="number"
-                          value={settings.customSheetWidth === null || settings.customSheetWidth === undefined ? "" : settings.customSheetWidth}
-                          onChange={(e) =>
-                            setSettings({
-                              ...settings,
-                              customSheetWidth: e.target.value === "" ? null : Number(e.target.value),
-                            })
-                          }
-                          className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                          Înălțime coală (mm)
-                        </label>
-                        <input
-                          type="number"
-                          value={settings.customSheetHeight === null || settings.customSheetHeight === undefined ? "" : settings.customSheetHeight}
-                          onChange={(e) =>
-                            setSettings({
-                              ...settings,
-                              customSheetHeight: e.target.value === "" ? null : Number(e.target.value),
-                            })
-                          }
-                          className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center justify-between p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl">
-                  <div className="flex items-center gap-2">
-                    <Maximize2 className={cn("w-4 h-4", settings.autoMaximize ? "text-amber-500" : "text-[#94a3b8]")} />
-                    <span className="text-sm font-medium text-white">Auto-Maximize</span>
-                  </div>
-                  <button 
-                    onClick={() => setSettings({...settings, autoMaximize: !settings.autoMaximize})}
-                    className={cn(
-                      "w-10 h-5 rounded-full transition-colors relative",
-                      settings.autoMaximize ? "bg-amber-500" : "bg-[#2d333b]"
-                    )}
-                  >
-                    <div className={cn(
-                      "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
-                      settings.autoMaximize ? "right-1" : "left-1"
-                    )} />
-                  </button>
-                </div>
-
-                {!settings.autoMaximize && (
-                  <div className="grid grid-cols-2 gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Rows</label>
-                      <input 
-                        type="number" 
-                        value={settings.impositionRows === null ? '' : settings.impositionRows}
-                        onChange={(e) => setSettings({...settings, impositionRows: e.target.value === '' ? null : Number(e.target.value)})}
-                        className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">Cols</label>
-                      <input 
-                        type="number" 
-                        value={settings.impositionCols === null ? '' : settings.impositionCols}
-                        onChange={(e) => setSettings({...settings, impositionCols: e.target.value === '' ? null : Number(e.target.value)})}
-                        className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-1.5">
-                  <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-[#94a3b8] ml-1">
-                    <label>Spacing (mm)</label>
-                    <span>{(!settings.impositionSpacing && settings.bleed) ? `Auto: ${(settings.bleed || 0) * 2}mm` : ''}</span>
-                  </div>
-                  <input 
-                    type="number" 
-                    placeholder={settings.bleed ? `${(settings.bleed || 0) * 2}` : "0"}
-                    value={settings.impositionSpacing === null ? '' : settings.impositionSpacing}
-                    onChange={(e) => setSettings({...settings, impositionSpacing: e.target.value === '' ? null : Number(e.target.value)})}
-                    className="w-full bg-[#1a1d23] border border-[#2d333b] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500"
+          <section className="sidebar-section space-y-2">
+            <p className="sidebar-kicker">Ghidaje</p>
+                <div className="sidebar-toggle">
+                  <span className="text-[var(--text-muted)]">Bleed / tăiere</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSettings({
+                        ...settings,
+                        showBleedGuide: !(settings.showBleedGuide ?? settings.showGuides ?? true),
+                      })
+                    }
+                    className="sidebar-toggle-switch"
+                    data-on={(settings.showBleedGuide ?? settings.showGuides ?? true) ? "true" : "false"}
+                    aria-pressed={settings.showBleedGuide ?? settings.showGuides ?? true}
                   />
                 </div>
-
-                <div className="flex items-center justify-between p-3 bg-[#1a1d23] border border-[#2d333b] rounded-xl">
-                  <div className="flex items-center gap-2">
-                    <CropIcon className={cn("w-4 h-4", settings.showCropMarks ? "text-amber-500" : "text-[#94a3b8]")} />
-                    <span className="text-sm font-medium">Show Crop Marks</span>
-                  </div>
-                  <button 
-                    onClick={() => setSettings({...settings, showCropMarks: !settings.showCropMarks})}
-                    className={cn(
-                      "w-10 h-5 rounded-full transition-colors relative",
-                      settings.showCropMarks ? "bg-amber-500" : "bg-[#2d333b]"
-                    )}
-                  >
-                    <div className={cn(
-                      "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
-                      settings.showCropMarks ? "right-1" : "left-1"
-                    )} />
-                  </button>
+                <div className="sidebar-toggle">
+                  <span className="text-[var(--text-muted)]">Safe zone</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSettings({
+                        ...settings,
+                        showSafeGuide: !(settings.showSafeGuide ?? settings.showGuides ?? true),
+                      })
+                    }
+                    className="sidebar-toggle-switch"
+                    data-on={(settings.showSafeGuide ?? settings.showGuides ?? true) ? "true" : "false"}
+                    aria-pressed={settings.showSafeGuide ?? settings.showGuides ?? true}
+                  />
                 </div>
-              </div>
-            </section>
-          )}
+          </section>
 
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="z-10 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--surface-elevated)]/85 px-2.5 backdrop-blur-md sm:h-14 sm:px-3 lg:px-6">
+        <header className="app-header z-10 flex h-12 shrink-0 items-center justify-between gap-2 px-2.5 sm:h-14 sm:px-3 lg:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs font-medium sm:gap-2 sm:text-sm">
             <button
               type="button"
@@ -1871,7 +1675,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                 onClick={() => {
                   setMockupMenuOpen(false);
                   setFormatPickerOpen(false);
-                  setSheetPickerOpen(false);
                   setExportMenuOpen((o) => !o);
                 }}
                 aria-expanded={exportMenuOpen}
@@ -2065,7 +1868,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               onClick={() => setSettings({ ...settings, addCutLine: !settings.addCutLine })}
                               className={cn(
                                 "relative h-5 w-10 shrink-0 rounded-full transition-colors",
-                                settings.addCutLine ? "bg-amber-500" : "bg-[#2d333b]",
+                                settings.addCutLine ? "bg-amber-500" : "bg-[var(--border)]",
                               )}
                               aria-pressed={settings.addCutLine}
                             >
@@ -2095,7 +1898,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               onClick={() => setSettings({ ...settings, simulateCMYK: !settings.simulateCMYK })}
                               className={cn(
                                 "relative mt-0.5 h-5 w-10 shrink-0 rounded-full transition-colors",
-                                settings.simulateCMYK ? "bg-amber-500" : "bg-[#2d333b]",
+                                settings.simulateCMYK ? "bg-amber-500" : "bg-[var(--border)]",
                               )}
                               aria-pressed={settings.simulateCMYK}
                               aria-label="Activează sau dezactivează aproximarea de contrast și culoare pe ecran"
@@ -2125,7 +1928,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                   if (!processedUrl) return;
                   setExportMenuOpen(false);
                   setFormatPickerOpen(false);
-                  setSheetPickerOpen(false);
                   setMockupMenuOpen((o) => !o);
                 }}
                 aria-expanded={mockupMenuOpen}
@@ -2242,19 +2044,60 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                   </div>
                 ) : (
                   <>
-                    <div className="mb-2 flex shrink-0 flex-col gap-2 pb-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="preview-bar mb-3 flex shrink-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="flex min-w-0 items-center gap-2.5">
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/15">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-amber-500/10">
                           <Eye className="h-4 w-4 text-amber-500" />
                         </div>
                         <div className="min-w-0">
                           <h3 className="text-xs font-bold uppercase tracking-wide text-[var(--text)]">Previzualizare tipăribil</h3>
                           <p className="text-[10px] text-[var(--text-muted)]">Bleed, safe, ghidaje</p>
+                          {(() => {
+                            const layout = getPrintLayoutFromSettings(settings);
+                            const totalWmm = layout.netWidthMm + 2 * layout.bleedMm;
+                            const totalHmm = layout.netHeightMm + 2 * layout.bleedMm;
+                            const targetPx = pickUpscaleNetCanvasPixels(
+                              layout.netWidthMm,
+                              layout.netHeightMm,
+                              layout.dpi,
+                            );
+                            const dpi = canvasIntrinsicPx
+                              ? Math.round(
+                                  computeEffectiveDpiForImage(
+                                    canvasIntrinsicPx.width,
+                                    canvasIntrinsicPx.height,
+                                    layout,
+                                  ),
+                                )
+                              : null;
+                            const targetDpi = resolveTargetDpi(settings.dpi);
+                            const dpiLow = dpi !== null && dpi < targetDpi * 0.85;
+                            return (
+                              <p
+                                className={cn(
+                                  "mt-0.5 text-[10px] font-semibold tabular-nums",
+                                  dpi === null
+                                    ? "text-[var(--text-muted)]"
+                                    : dpiLow
+                                      ? "text-amber-400"
+                                      : "text-emerald-400/90",
+                                )}
+                              >
+                                {layout.netWidthMm}×{layout.netHeightMm} mm
+                                {layout.bleedMm > 0 ? ` (+${layout.bleedMm} bleed)` : ""}
+                                {canvasIntrinsicPx
+                                  ? ` · ${canvasIntrinsicPx.width}×${canvasIntrinsicPx.height} px`
+                                  : ""}
+                                {dpi !== null ? ` · ~${dpi} DPI` : ""}
+                                {` · țintă ${targetPx.width}×${targetPx.height} px`}
+                              </p>
+                            );
+                          })()}
                           <p className="mt-0.5 truncate text-[11px] text-[var(--text-muted)]" title={file?.name}>{file?.name}</p>
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                        {!rightToolsOpen && (
+                        {ENABLE_AGENT_QUALITY_PANEL && !rightToolsOpen && (
                           <button
                             type="button"
                             onClick={() => setRightToolsOpen(true)}
@@ -2265,18 +2108,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             Panou AI
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => setSettings((prev) => ({ ...prev, showGuides: !prev.showGuides }))}
-                          className={cn(
-                            "rounded-lg border px-3 py-1.5 text-xs font-bold transition-all",
-                            settings.showGuides
-                              ? "border-amber-500 bg-amber-500 text-black"
-                              : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text-muted)]",
-                          )}
-                        >
-                          Guides
-                        </button>
                         <button
                           type="button"
                           onClick={handleDownload}
@@ -2311,36 +2142,28 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                       })}
                     >
                       <input {...getInputProps()} />
-                <div className="relative flex min-h-0 flex-1 flex-col overflow-auto rounded-lg border border-[var(--border)] bg-[#0d1117] p-3 sm:p-6">
+                <div className="preview-stage relative flex min-h-0 flex-1 flex-col overflow-auto p-3 sm:p-6">
                   {canvasDisplayUrl ? (
                     <div className="flex min-h-0 w-full max-w-full flex-1 flex-col gap-3">
-                      <div className="relative flex min-h-0 flex-1 items-center justify-center">
+                      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
                         <div
-                          className="relative group shadow-[0_20px_50px_rgba(0,0,0,0.5)] bg-white transition-all duration-500"
-                          style={{
-                            aspectRatio: (() => {
-                              const f = PRINT_FORMATS.find((fmt) => fmt.id === settings.formatId);
-                              const netW =
-                                settings.formatId === "custom"
-                                  ? settings.customWidth || 1
-                                  : f?.width || 1;
-                              const netH =
-                                settings.formatId === "custom"
-                                  ? settings.customHeight || 1
-                                  : f?.height || 1;
-                              const bleed = settings.bleed ?? 0;
-                              const w = netW + 2 * bleed;
-                              const h = netH + 2 * bleed;
-                              return `${w} / ${h}`;
-                            })(),
-                            maxHeight: "100%",
-                            maxWidth: "100%",
-                            width: "auto",
-                            height: "auto",
-                          }}
+                          className="relative min-h-[8rem] min-w-[5rem] overflow-hidden bg-white shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all duration-300"
+                          style={(() => {
+                            const layout = getPrintLayoutFromSettings(settings);
+                            const totalWmm = layout.netWidthMm + 2 * layout.bleedMm;
+                            const totalHmm = layout.netHeightMm + 2 * layout.bleedMm;
+                            const landscape = totalWmm >= totalHmm;
+                            return {
+                              aspectRatio: `${totalWmm} / ${totalHmm}`,
+                              maxWidth: "100%",
+                              maxHeight: "100%",
+                              width: landscape ? "100%" : "auto",
+                              height: landscape ? "auto" : "100%",
+                            };
+                          })()}
                         >
                           {totalPages > 1 && (
-                            <div className="absolute left-2 top-2 z-50 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#1a1d23]/80 px-2 py-1 backdrop-blur-md sm:left-4 sm:top-4 sm:gap-2 sm:px-3 sm:py-1.5">
+                            <div className="absolute left-2 top-2 z-50 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[var(--card)]/80 px-2 py-1 backdrop-blur-md sm:left-4 sm:top-4 sm:gap-2 sm:px-3 sm:py-1.5">
                               <button
                                 onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                                 disabled={currentPage === 1}
@@ -2348,7 +2171,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               >
                                 <ChevronLeft className="h-4 w-4" />
                               </button>
-                              <span className="min-w-[3rem] text-center text-[10px] font-bold text-[#94a3b8]">
+                              <span className="min-w-[3rem] text-center text-[10px] font-bold text-[var(--text-muted)]">
                                 Page {currentPage} / {totalPages}
                               </span>
                               <button
@@ -2361,25 +2184,32 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             </div>
                           )}
 
-                          <img
-                            key={`canvas-${canvasRevision}`}
-                            ref={imgRef}
-                            src={canvasDisplayUrl}
-                            alt="Processed"
-                            className={cn(
-                              "h-full w-full object-cover transition-all duration-300",
-                              settings.simulateCMYK && "simulate-cmyk",
-                            )}
-                          />
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <img
+                              key={`canvas-${canvasRevision}`}
+                              ref={imgRef}
+                              src={canvasDisplayUrl}
+                              alt="Processed"
+                              width={canvasIntrinsicPx?.width}
+                              height={canvasIntrinsicPx?.height}
+                              className={cn(
+                                "max-h-full max-w-full object-contain transition-opacity duration-300",
+                                settings.simulateCMYK && "simulate-cmyk",
+                              )}
+                              style={{ imageRendering: "auto" }}
+                              draggable={false}
+                            />
+                          </div>
 
-                          {settings.showGuides && (
+                          {((settings.showBleedGuide ?? settings.showGuides) ||
+                            (settings.showSafeGuide ?? settings.showGuides)) && (
                         <div className="absolute inset-0 pointer-events-none overflow-hidden">
                           {(() => {
-                            const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
-                            let targetWidthMm = settings.formatId === 'custom' ? (settings.customWidth || 0) : currentFormat?.width || 90;
-                            let targetHeightMm = settings.formatId === 'custom' ? (settings.customHeight || 0) : currentFormat?.height || 50;
-                            
-                            const bleed = settings.bleed || 0;
+                            const layout = getPrintLayoutFromSettings(settings);
+                            const targetWidthMm = layout.netWidthMm;
+                            const targetHeightMm = layout.netHeightMm;
+                            const bleed = layout.bleedMm;
+                            const safeMargin = layout.safeMarginMm;
                             const totalWidth = targetWidthMm + 2 * bleed;
                             const totalHeight = targetHeightMm + 2 * bleed;
 
@@ -2388,6 +2218,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
                             return (
                               <>
+                                {(settings.showBleedGuide ?? settings.showGuides) && (
+                                  <>
                                 {/* GROSS FORMAT BOUNDARY (Total File) */}
                                 <div className="absolute inset-0 border-2 border-dashed border-white/20" />
                                 
@@ -2425,16 +2257,18 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                                     LINIE TĂIERE (NET: {targetWidthMm}x{targetHeightMm}mm)
                                   </div>
                                 </div>
+                                  </>
+                                )}
 
                                 {/* SAFE MARGIN (Internal) */}
-                                {(settings.safeMargin || 0) > 0 && (
-                                  <div 
+                                {(settings.showSafeGuide ?? settings.showGuides) && safeMargin > 0 && (
+                                  <div
                                     className="absolute border border-dashed border-amber-500/50"
                                     style={{
-                                      top: `${((bleed + (settings.safeMargin || 0)) / totalHeight) * 100}%`,
-                                      left: `${((bleed + (settings.safeMargin || 0)) / totalWidth) * 100}%`,
-                                      right: `${((bleed + (settings.safeMargin || 0)) / totalWidth) * 100}%`,
-                                      bottom: `${((bleed + (settings.safeMargin || 0)) / totalHeight) * 100}%`,
+                                      top: `${((bleed + safeMargin) / totalHeight) * 100}%`,
+                                      left: `${((bleed + safeMargin) / totalWidth) * 100}%`,
+                                      right: `${((bleed + safeMargin) / totalWidth) * 100}%`,
+                                      bottom: `${((bleed + safeMargin) / totalHeight) * 100}%`,
                                     }}
                                   >
                                     <div className="absolute top-0 left-0 px-1 py-0.5 bg-amber-500/20 text-amber-500 text-[7px] font-bold uppercase">Safe Zone</div>
@@ -2461,90 +2295,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           />
                     </div>
                       </div>
-
-                      <div className="flex shrink-0 flex-wrap items-center justify-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void handleImposition()}
-                            disabled={isProcessing}
-                            className={cn(
-                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
-                              "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
-                            )}
-                          >
-<LayoutGrid className="h-4 w-4 shrink-0 text-amber-500" />
-                            <span>Imposition</span>
-                          </button>
-
-                          <div ref={aiUpscaleMenuRef} className="relative">
-                            <button
-                              type="button"
-                              onClick={() => setAiUpscaleMenuOpen((o) => !o)}
-                              disabled={isProcessing}
-                              className={cn(
-                                "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
-                                aiUpscaleMenuOpen
-                                  ? "border-amber-500/45 bg-amber-500/10 text-[var(--text)]"
-                                  : "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
-                              )}
-                            >
-<ArrowUpCircle className="h-4 w-4 shrink-0 text-amber-500" />
-                              <span>AI Upscale</span>
-                              <ChevronDown
-                                className={cn(
-                                  "h-3.5 w-3.5 shrink-0 opacity-80 transition-transform",
-                                  aiUpscaleMenuOpen && "rotate-180",
-                                )}
-                              />
-                            </button>
-                            {aiUpscaleMenuOpen && (
-                              <div className="absolute bottom-full left-1/2 z-[60] mb-2 w-[12.5rem] -translate-x-1/2 rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] p-1.5 shadow-lg">
-                                <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                                  Mod upscale
-                                </p>
-                                <button
-                                  type="button"
-                                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[11px] font-semibold text-[var(--text)] transition-colors hover:bg-amber-500/10"
-                                  onClick={() => {
-                                    setAiUpscaleMenuOpen(false);
-                                    void handleUpscale("extend");
-                                  }}
-                                >
-                                  Extend
-                                  {(settings.upscaleMode ?? "extend") === "extend" && (
-                                    <Check className="h-3.5 w-3.5 text-amber-500" />
-                                  )}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[11px] font-semibold text-[var(--text)] transition-colors hover:bg-amber-500/10"
-                                  onClick={() => {
-                                    setAiUpscaleMenuOpen(false);
-                                    void handleUpscale("recompose");
-                                  }}
-                                >
-                                  Recompose
-                                  {settings.upscaleMode === "recompose" && (
-                                    <Check className="h-3.5 w-3.5 text-amber-500" />
-                                  )}
-                                </button>
-                              </div>
-                            )}
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => void handleGenerativeFill()}
-                            disabled={isProcessing}
-                            className={cn(
-                              "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-45",
-                              "border-[var(--border)] bg-[var(--card)]/60 text-[var(--text)] hover:border-amber-500/45 hover:bg-amber-500/5",
-                            )}
-                          >
-<Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
-                            <span>AI Bleed</span>
-                          </button>
-                      </div>
                     </div>
                   ) : (
                     <div className="text-center space-y-4 opacity-30">
@@ -2559,6 +2309,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
               </div>
             </div>
 
+            {ENABLE_AGENT_QUALITY_PANEL && (
             <div
               className={cn(
                 "min-h-0 shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-out lg:flex lg:h-full lg:min-h-0",
@@ -2585,7 +2336,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         setRightToolsTab("agent");
                         setRightToolsOpen(true);
                       }}
-                      className="rounded-lg border border-transparent p-2 text-[#64748b] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+                      className="rounded-lg border border-transparent p-2 text-[var(--text-subtle)] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
                       title="Agent AI"
                       aria-label="Deschide Agent AI"
                     >
@@ -2597,7 +2348,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         setRightToolsTab("quality");
                         setRightToolsOpen(true);
                       }}
-                      className="rounded-lg border border-transparent p-2 text-[#64748b] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+                      className="rounded-lg border border-transparent p-2 text-[var(--text-subtle)] hover:border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
                       title="Verificare calitate"
                       aria-label="Deschide Verificare calitate"
                     >
@@ -2668,7 +2419,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           className={cn(
                             "flex items-center justify-center rounded-lg border p-2 transition-colors",
                             hasKey
-                              ? "border-transparent bg-transparent text-[#64748b] hover:bg-white/5 hover:text-[var(--text-muted)]"
+                              ? "border-transparent bg-transparent text-[var(--text-subtle)] hover:bg-white/5 hover:text-[var(--text-muted)]"
                               : "border-amber-500/35 bg-amber-500/10 text-amber-400 hover:bg-amber-500/15",
                           )}
                           title={
@@ -2682,10 +2433,10 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         </button>
                       </div>
 
-                      <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto bg-[#0d1117]/25 p-3 sm:p-3">
+                      <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto bg-[var(--bg-deep)]/25 p-3 sm:p-3">
                         {chatMessages.length === 0 && (
                           <div className="flex h-full min-h-[8rem] flex-col items-center justify-center gap-4 px-6 py-8 text-center opacity-30">
-                            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#1a1d23]">
+                            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[var(--card)]">
                               <Mic className="h-8 w-8" />
                             </div>
                             <p className="text-xs">„Setează formatul A3 și adaugă 3mm bleed”</p>
@@ -2705,7 +2456,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                                 "rounded-2xl px-4 py-2.5 text-xs leading-relaxed shadow-sm",
                                 msg.role === "user"
                                   ? "rounded-tr-none bg-amber-500 font-medium text-black"
-                                  : "rounded-tl-none border border-[#2d333b] bg-[#1a1d23] text-[#e6edf3]",
+                                  : "rounded-tl-none border border-[var(--border)] bg-[var(--card)] text-[var(--text)]",
                               )}
                             >
                               {msg.content}
@@ -2713,7 +2464,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           </div>
                         ))}
                         {isTyping && (
-                          <div className="flex w-16 items-center gap-1 rounded-2xl rounded-tl-none border border-[#2d333b] bg-[#1a1d23] px-4 py-2">
+                          <div className="flex w-16 items-center gap-1 rounded-2xl rounded-tl-none border border-[var(--border)] bg-[var(--card)] px-4 py-2">
                             <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500" />
                             <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500 [animation-delay:0.2s]" />
                             <div className="h-1 w-1 animate-bounce rounded-full bg-amber-500 [animation-delay:0.4s]" />
@@ -2743,7 +2494,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               handleSendMessage(el.value);
                               el.value = "";
                             }}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-[#94a3b8] transition-colors hover:text-amber-500"
+                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] transition-colors hover:text-amber-500"
                             aria-label="Trimite mesajul"
                           >
                             <Send className="h-4 w-4" />
@@ -2769,11 +2520,11 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         </button>
                       </div>
 
-                      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[#0d1117]/80 p-3">
+                      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--bg-deep)]/80 p-3">
                         {analysis ? (
                           <div className="space-y-4">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs text-[#94a3b8]">Estimare risc tipar</span>
+                              <span className="text-xs text-[var(--text-muted)]">Estimare risc tipar</span>
                               <span
                                 className={cn(
                                   "rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wide",
@@ -2793,7 +2544,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             </div>
 
                             <div className="space-y-2">
-                              <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Issues Detected</p>
+                              <p className="text-[10px] font-bold uppercase text-[var(--text-muted)]">Issues Detected</p>
                               {analysis.issues.length > 0 ? (
                                 analysis.issues.map((issue: string, i: number) => (
                                   <div key={i} className="flex items-center gap-2 text-xs text-red-400">
@@ -2810,9 +2561,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             </div>
 
                             <div className="space-y-2">
-                              <p className="text-[10px] font-bold uppercase text-[#94a3b8]">Recommendations</p>
+                              <p className="text-[10px] font-bold uppercase text-[var(--text-muted)]">Recommendations</p>
                               {analysis.recommendations.map((rec: string, i: number) => (
-                                <div key={i} className="flex items-start gap-2 text-xs text-[#94a3b8]">
+                                <div key={i} className="flex items-start gap-2 text-xs text-[var(--text-muted)]">
                                   <ChevronRight className="mt-0.5 h-3 w-3 shrink-0" />
                                   {rec}
                                 </div>
@@ -2841,11 +2592,12 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                 </aside>
               )}
             </div>
+            )}
             </div>
           </div>
       </main>
 
-      {!rightToolsOpen && (
+      {ENABLE_AGENT_QUALITY_PANEL && !rightToolsOpen && (
         <button
           type="button"
           className="fixed bottom-4 right-4 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-elevated)] text-amber-400 shadow-lg transition-colors hover:border-amber-500/45 hover:bg-amber-500/10 lg:hidden"

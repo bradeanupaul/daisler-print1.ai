@@ -33,10 +33,10 @@ function ProviderSection(props: {
         {summary.calls.map((call, i) => (
           <li
             key={`${call.label}-${i}`}
-            className="rounded-md bg-black/25 px-2 py-1.5 text-[10px] leading-snug text-[#c9d1d9]"
+            className="rounded-md bg-black/25 px-2 py-1.5 text-[10px] leading-snug text-[var(--text)]"
           >
-            <p className="font-medium text-[#e6edf3]">{call.label}</p>
-            <p className="break-all text-[#8b949e]">{call.model}</p>
+            <p className="font-medium text-[var(--text)]">{call.label}</p>
+            <p className="break-all text-[var(--text-muted)]">{call.model}</p>
             <p className="tabular-nums">
               {formatTokenCount(call.totalTokens)} tokeni
               <span className="text-[#6e7681]">
@@ -49,7 +49,7 @@ function ProviderSection(props: {
           </li>
         ))}
       </ul>
-      <p className="border-t border-[#30363d] pt-1.5 text-[10px] tabular-nums text-[#8b949e]">
+      <p className="border-t border-[var(--border)] pt-1.5 text-[10px] tabular-nums text-[var(--text-muted)]">
         Subtotal {title}: {formatTokenCount(summary.totalTokens)} tokeni ·{" "}
         <span className="font-medium text-emerald-300">{formatUsd(summary.estimatedUsd)}</span>
       </p>
@@ -84,9 +84,9 @@ function UsagePopupContent({ metadata }: { metadata: unknown }) {
 
   return (
     <>
-      <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#8b949e]">Consum API</p>
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[var(--text-muted)]">Consum API</p>
       {!usage ? (
-        <p className="text-[10px] leading-relaxed text-[#8b949e]">
+        <p className="text-[10px] leading-relaxed text-[var(--text-muted)]">
           Nu există date salvate pentru această imagine. Apare după o generare AI nouă (Upscale / Bleed).
         </p>
       ) : (
@@ -100,10 +100,10 @@ function UsagePopupContent({ metadata }: { metadata: unknown }) {
               <ProviderSection title="ChatGPT" summary={openai} accentClass="text-emerald-400" />
             )}
             {!hasGemini && !hasOpenai && (
-              <p className="text-[10px] text-[#8b949e]">Niciun apel înregistrat.</p>
+              <p className="text-[10px] text-[var(--text-muted)]">Niciun apel înregistrat.</p>
             )}
           </div>
-          <p className="mt-2 border-t border-[#30363d] pt-2 text-[11px] font-semibold tabular-nums text-white">
+          <p className="mt-2 border-t border-[var(--border)] pt-2 text-[11px] font-semibold tabular-nums text-white">
             Total: {formatTokenCount(usage.totalTokens)} tokeni ·{" "}
             <span className="text-emerald-300">{formatUsd(usage.estimatedUsd)}</span>
           </p>
@@ -212,7 +212,7 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
           className="absolute left-0 right-0 h-2"
           style={coords.placeAbove ? { bottom: -GAP, height: GAP + 4 } : { top: -GAP, height: GAP + 4 }}
         />
-        <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-2.5 shadow-xl ring-1 ring-black/50">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-overlay)] p-2.5 shadow-xl ring-1 ring-black/50">
           <div className="mb-1.5 flex items-center justify-between gap-2">
             <span className="text-[9px] text-[#6e7681]">Scroll pentru detalii · click pentru fixare</span>
             {pinned && (
@@ -233,10 +233,10 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
         ref={btnRef}
         type="button"
         className={cn(
-          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border bg-[#21262d] transition-colors",
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border bg-[var(--border-strong)] transition-colors",
           usage
             ? "border-emerald-500/30 text-emerald-400/90 hover:border-emerald-500/50 hover:bg-emerald-500/10"
-            : "border-[#30363d] text-[#6e7681] hover:border-[#484f58] hover:text-[#8b949e]",
+            : "border-[var(--border)] text-[#6e7681] hover:border-[#484f58] hover:text-[var(--text-muted)]",
           pinned && "ring-1 ring-amber-500/50",
           className,
         )}

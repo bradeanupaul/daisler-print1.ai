@@ -51,7 +51,7 @@ class ErrorBoundary extends React.Component<Props, State> {
             </div>
             <div className="space-y-2">
               <h2 className="text-2xl font-bold text-white">Something went wrong</h2>
-              <p className="text-[#94a3b8] text-sm leading-relaxed">
+              <p className="text-[var(--text-muted)] text-sm leading-relaxed">
                 {isFirestoreError ? "There was a problem communicating with the database." : "The application encountered an error and needs to restart."}
               </p>
             </div>

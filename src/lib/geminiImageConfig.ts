@@ -80,9 +80,13 @@ export function resolveGeminiImageSizeForModel(
   requested: GeminiImageSizeTier,
 ): GeminiImageSizeTier {
   const id = modelId.toLowerCase();
-  if (id.includes("2.5-flash-image")) return "1K";
-  if (id.includes("flash-image") && !id.includes("3-pro")) {
+  if (id.includes("2.5-flash-image")) {
     return requested === "4K" ? "2K" : requested;
   }
-  return requested;
+  if (id.includes("flash-image") && !id.includes("3-pro")) {
+    if (requested === "4K") return "2K";
+    return requested;
+  }
+  if (id.includes("3-pro-image")) return requested;
+  return requested === "4K" ? "4K" : requested;
 }

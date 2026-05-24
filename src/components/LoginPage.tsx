@@ -55,7 +55,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
       <div className="hidden lg:flex lg:w-1/2 bg-[var(--surface-elevated)] p-12 flex-col justify-between relative overflow-hidden border-r border-white/5">
         <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
           <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-amber-500 rounded-full blur-[120px]" />
-          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500 rounded-full blur-[120px]" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-amber-700/25 rounded-full blur-[120px]" />
         </div>
 
         <div className="relative z-10">
@@ -76,7 +76,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
               <h2 className="text-4xl font-bold leading-tight">
                 The Future of <span className="text-amber-500">Print Processing</span> is Here.
               </h2>
-              <p className="text-[#94a3b8] text-lg">
+              <p className="text-[var(--text-muted)] text-lg">
                 Automate your prepress workflow with AI-powered bleed management, DPI scaling, and 3D mockups.
               </p>
             </motion.div>
@@ -100,7 +100,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                   </div>
                   <div>
                     <h4 className="font-semibold text-white">{feature.title}</h4>
-                    <p className="text-sm text-[#94a3b8]">{feature.desc}</p>
+                    <p className="text-sm text-[var(--text-muted)]">{feature.desc}</p>
                   </div>
                 </motion.div>
               ))}
@@ -129,14 +129,14 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
         >
           <div className="text-center space-y-2">
             <h2 className="text-3xl font-bold text-white">Welcome back</h2>
-            <p className="text-[#94a3b8]">Log in to your print1.ai account to continue</p>
+            <p className="text-[var(--text-muted)]">Log in to your print1.ai account to continue</p>
             {authHost && (
-              <p className="pt-1 text-center font-mono text-[10px] leading-relaxed text-[#64748b] break-all">
-                Firebase vede acest host: <span className="text-[#94a3b8]">{authHost.hostname}</span>
+              <p className="pt-1 text-center font-mono text-[10px] leading-relaxed text-[var(--text-subtle)] break-all">
+                Firebase vede acest host: <span className="text-[var(--text-muted)]">{authHost.hostname}</span>
                 <br />
-                Origine completă: <span className="text-[#94a3b8]">{authHost.origin}</span>
+                Origine completă: <span className="text-[var(--text-muted)]">{authHost.origin}</span>
                 <br />
-                Proiect din app: <span className="text-[#94a3b8]">{firebaseConfig.projectId}</span>
+                Proiect din app: <span className="text-[var(--text-muted)]">{firebaseConfig.projectId}</span>
               </p>
             )}
           </div>
@@ -147,7 +147,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
               className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-100"
             >
               <p className="font-semibold text-amber-400">Host diferit de «localhost»</p>
-              <p className="mt-1 text-xs text-[#94a3b8]">
+              <p className="mt-1 text-xs text-[var(--text-muted)]">
                 Rulezi pe <code className="rounded bg-black/30 px-1">{authHost.hostname}</code> (ex. IP din rețea sau tunel).
                 Firebase cere același host în <span className="text-[#e2e8f0]">Authorized domains</span>, sau deschide app-ul la{" "}
                 <a
@@ -171,13 +171,13 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                 Ești pe <code className="rounded bg-black/30 px-1.5 py-0.5 text-xs">127.0.0.1</code> — Firebase îl tratează separat de{" "}
                 <code className="rounded bg-black/30 px-1.5 py-0.5 text-xs">localhost</code>.
               </p>
-              <p className="mt-2 text-xs text-[#94a3b8]">
+              <p className="mt-2 text-xs text-[var(--text-muted)]">
                 <span className="font-medium text-[#e2e8f0]">Soluție rapidă:</span> deschide aplicația de aici:{" "}
                 <a href={localhostLoginUrl} className="font-mono text-amber-400 underline hover:text-amber-300">
                   {localhostLoginUrl}
                 </a>
               </p>
-              <p className="mt-2 text-xs text-[#94a3b8]">
+              <p className="mt-2 text-xs text-[var(--text-muted)]">
                 <span className="font-medium text-[#e2e8f0]">Alternativ:</span> Firebase Console → Authentication → Settings →{" "}
                 <span className="text-[#e2e8f0]">Authorized domains</span> → Add domain → introdu{" "}
                 <code className="rounded bg-black/30 px-1">127.0.0.1</code> (fără port).
@@ -186,7 +186,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
           )}
 
           {authHost?.hostname === "localhost" && (
-            <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-xs text-[#94a3b8]">
+            <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-xs text-[var(--text-muted)]">
               <span className="font-semibold text-[#e2e8f0]">Tot «unauthorized-domain» pe localhost?</span> Deschide Firebase pentru
               proiectul <code className="rounded bg-black/30 px-1">{firebaseConfig.projectId}</code> → Authentication → Settings →
               Authorized domains și confirmă că există <code className="rounded bg-black/30 px-1">localhost</code>. Dacă nu ai drepturi
@@ -196,7 +196,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
             </p>
           )}
 
-          <div className="bg-[#161b22] p-8 rounded-3xl border border-white/5 shadow-2xl space-y-6">
+          <div className="bg-[var(--surface-overlay)] p-8 rounded-3xl border border-white/5 shadow-2xl space-y-6">
             <motion.button
               type="button"
               whileTap={{ scale: 0.97 }}
@@ -230,27 +230,27 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                 <div className="w-full border-t border-white/5"></div>
               </div>
               <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-[#161b22] px-2 text-[#4b5563]">Or continue with</span>
+                <span className="bg-[var(--surface-overlay)] px-2 text-[#4b5563]">Or continue with</span>
               </div>
             </div>
 
             <div className="space-y-4">
               <div className="space-y-2">
-                <label className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider">Email Address</label>
+                <label className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Email Address</label>
                 <input 
                   type="email" 
                   disabled
                   placeholder="name@company.com"
-                  className="w-full bg-[#0d1117] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500/50 transition-colors opacity-50 cursor-not-allowed"
+                  className="w-full bg-[var(--bg-deep)] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500/50 transition-colors opacity-50 cursor-not-allowed"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider">Password</label>
+                <label className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">Password</label>
                 <input 
                   type="password" 
                   disabled
                   placeholder="••••••••"
-                  className="w-full bg-[#0d1117] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500/50 transition-colors opacity-50 cursor-not-allowed"
+                  className="w-full bg-[var(--bg-deep)] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500/50 transition-colors opacity-50 cursor-not-allowed"
                 />
               </div>
               <button 
