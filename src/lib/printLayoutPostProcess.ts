@@ -3,17 +3,13 @@
  * Se aplică doar bleed algoritmic din ultimul rând/coloană de pixeli de pe margini.
  */
 import { ensureImageDataUrl } from "./imageDataUrl";
-import { fillSafeZoneMarginsOnCanvas } from "./printSafeZoneFill";
 import { pickUpscaleNetCanvasPixels } from "./upscaleCompose";
 import { PRINT_FORMATS, type ProcessingSettings } from "../types";
 
 export type PrintArtworkFit = "contain" | "cover";
 
 export type AlgorithmicBleedOptions = {
-  /**
-   * Umple benzile exterioare (în afara content safe area) cu fundal extrapolat.
-   * Implicit true când există safe margin — acoperă conținut plasat greșit de model.
-   */
+  /** @deprecated Bleed-ul folosește întotdeauna marginea bitmap-ului, nu safe zone. */
   applySafeZoneFill?: boolean;
 };
 
@@ -219,7 +215,10 @@ export async function prepareAiWorkspaceImage(
   );
   onStage?.(`Normalizez la ${targetW}×${targetH}px (țintă AI pentru ${layout.dpi} DPI)…`);
   const netUrl = await normalizeImageDataUrlToExactPixels(imageDataUrl, targetW, targetH);
-  return addAlgorithmicBleed(netUrl, layout, onStage, options);
+  return addAlgorithmicBleed(netUrl, layout, onStage, {
+    ...options,
+    applySafeZoneFill: false,
+  });
 }
 
 /** Copiază imaginea la rezoluția ei nativă, fără scalare. */
@@ -265,13 +264,14 @@ function sampleCornerBg(imageData: ImageData, w: number, h: number): Rgb {
 }
 
 /**
- * Bleed: doar ultimul rând/coloană de pixeli de pe marginea net-ului, întins în banda de bleed.
- * Zona net (artwork) rămâne neschimbată — `drawImage` o copiază pixel-perfect peste extrapolare.
+ * Bleed: extrapolare din ultimul rând/coloană de pixeli de pe marginea bitmap-ului (x=0, y=0, …),
+ * întins în banda exterioară. Nu folosește linia de ghidaj trim/bleed — doar pixelii de la capătul imaginii.
  */
 function composeBleedAroundNet(
   netCanvas: HTMLCanvasElement,
   layout: PrintLayoutPx,
   bg: Rgb,
+  edgeSource?: HTMLCanvasElement,
 ): HTMLCanvasElement {
   const out = document.createElement("canvas");
   out.width = layout.totalW;
@@ -280,6 +280,7 @@ function composeBleedAroundNet(
   if (!ctx) return out;
 
   const { trim, bleedPx } = layout;
+  const edgeCanvas = edgeSource ?? netCanvas;
   ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
   ctx.fillRect(0, 0, out.width, out.height);
 
@@ -290,32 +291,35 @@ function composeBleedAroundNet(
 
   const nw = netCanvas.width;
   const nh = netCanvas.height;
-  const nctxNet = netCanvas.getContext("2d");
-  if (!nctxNet) {
+  const ew = edgeCanvas.width;
+  const eh = edgeCanvas.height;
+  const edgeCtx = edgeCanvas.getContext("2d");
+  if (!edgeCtx) {
     ctx.drawImage(netCanvas, trim.x, trim.y);
     return out;
   }
 
-  ctx.drawImage(netCanvas, 0, 0, nw, 1, trim.x, 0, nw, bleedPx);
-  ctx.drawImage(netCanvas, 0, nh - 1, nw, 1, trim.x, trim.y + nh, nw, bleedPx);
-  ctx.drawImage(netCanvas, 0, 0, 1, nh, 0, trim.y, bleedPx, nh);
-  ctx.drawImage(netCanvas, nw - 1, 0, 1, nh, trim.x + nw, trim.y, bleedPx, nh);
+  // Extrapolare din marginea exterioară a bitmap-ului (ultimul pixel), nu din linia trim/safe.
+  ctx.drawImage(edgeCanvas, 0, 0, ew, 1, trim.x, 0, nw, bleedPx);
+  ctx.drawImage(edgeCanvas, 0, eh - 1, ew, 1, trim.x, trim.y + nh, nw, bleedPx);
+  ctx.drawImage(edgeCanvas, 0, 0, 1, eh, 0, trim.y, bleedPx, nh);
+  ctx.drawImage(edgeCanvas, ew - 1, 0, 1, eh, trim.x + nw, trim.y, bleedPx, nh);
 
-  function sampleNetPixel(x: number, y: number): Rgb {
-    const sx = Math.min(Math.max(0, x), nw - 1);
-    const sy = Math.min(Math.max(0, y), nh - 1);
-    const d = nctxNet.getImageData(sx, sy, 1, 1).data;
+  function sampleEdgePixel(x: number, y: number): Rgb {
+    const sx = Math.min(Math.max(0, x), ew - 1);
+    const sy = Math.min(Math.max(0, y), eh - 1);
+    const d = edgeCtx.getImageData(sx, sy, 1, 1).data;
     return [d[0]!, d[1]!, d[2]!];
   }
 
   const corners: Array<[number, number, number, number, number, number]> = [
     [0, 0, bleedPx, bleedPx, 0, 0],
-    [trim.x + nw, 0, bleedPx, bleedPx, nw - 1, 0],
-    [0, trim.y + nh, bleedPx, bleedPx, 0, nh - 1],
-    [trim.x + nw, trim.y + nh, bleedPx, bleedPx, nw - 1, nh - 1],
+    [trim.x + nw, 0, bleedPx, bleedPx, ew - 1, 0],
+    [0, trim.y + nh, bleedPx, bleedPx, 0, eh - 1],
+    [trim.x + nw, trim.y + nh, bleedPx, bleedPx, ew - 1, eh - 1],
   ];
   for (const [dx, dy, w, h, px, py] of corners) {
-    const c = sampleNetPixel(px, py);
+    const c = sampleEdgePixel(px, py);
     ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
     ctx.fillRect(dx, dy, w, h);
   }
@@ -325,13 +329,13 @@ function composeBleedAroundNet(
 }
 
 /**
- * Imaginea modelului rămâne la pixelii returnați; opțional bleed algoritmic în jur.
+ * Imaginea modelului rămâne la pixelii returnați; bleed algoritmic în jur, extrapolat din marginea bitmap-ului.
  */
 export async function addAlgorithmicBleed(
   imageDataUrl: string,
   layout: PrintLayoutMm,
   onStage?: (message: string) => void,
-  options?: AlgorithmicBleedOptions,
+  _options?: AlgorithmicBleedOptions,
 ): Promise<string> {
   const resolvedUrl = await ensureImageDataUrl(imageDataUrl);
   const img = await loadImage(resolvedUrl);
@@ -344,27 +348,17 @@ export async function addAlgorithmicBleed(
     return resolvedUrl;
   }
 
-  onStage?.("Pregătesc imaginea AI (fără scalare)…");
+  onStage?.("Pregătesc imaginea (fără scalare)…");
   const netCanvas = buildNetCanvasFromImage(img);
-
-  const pxPerMm = Math.min(
-    nw / Math.max(layout.netWidthMm, 1e-6),
-    nh / Math.max(layout.netHeightMm, 1e-6),
-  );
-  const safePx =
-    layout.safeMarginMm > 0 ? Math.max(1, Math.round(layout.safeMarginMm * pxPerMm)) : 0;
-  const shouldFillSafe =
-    options?.applySafeZoneFill !== false && safePx > 0;
-  if (shouldFillSafe) {
-    onStage?.("Generez fundal safe zone (extrapolare sintetică din margini)…");
-    fillSafeZoneMarginsOnCanvas(netCanvas, safePx);
-  }
+  const edgeSource = buildNetCanvasFromImage(img);
 
   const bleedLayout = computeBleedLayoutPx(nw, nh, bleedPx);
-  const trimData = netCanvas.getContext("2d")!.getImageData(0, 0, nw, nh);
+  const trimData = edgeSource.getContext("2d")!.getImageData(0, 0, nw, nh);
   const bg = sampleCornerBg(trimData, nw, nh);
-  onStage?.(`Generez bleed (${layout.bleedMm} mm ≈ ${bleedPx}px/latură) din marginea imaginii…`);
-  const finalCanvas = composeBleedAroundNet(netCanvas, bleedLayout, bg);
+  onStage?.(
+    `Generez bleed (${layout.bleedMm} mm ≈ ${bleedPx}px/latură) din ultimul pixel al marginii imaginii…`,
+  );
+  const finalCanvas = composeBleedAroundNet(netCanvas, bleedLayout, bg, edgeSource);
   return finalCanvas.toDataURL("image/png");
 }
 

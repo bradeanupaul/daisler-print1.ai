@@ -101,6 +101,7 @@ import { reportAiError } from '../../lib/reportAiError';
 import { aiError, aiLog } from '../../lib/aiUpscaleLog';
 import { ensureImageDataUrl } from '../../lib/imageDataUrl';
 import {
+  addAlgorithmicBleed,
   computeEffectiveDpiForImage,
   getPrintLayoutFromSettings,
   prepareAiWorkspaceImage,
@@ -537,18 +538,20 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       url: string | null,
       options?: {
         layoutSettings?: ProcessingSettings;
-        applySafeZoneFill?: boolean;
+        /** true = normalizează la rezoluția AI înainte de bleed (output upscale). */
+        normalizeToAiTarget?: boolean;
       },
     ): Promise<string | null> => {
       if (!url) return null;
       const layout = getPrintLayoutFromSettings(options?.layoutSettings ?? settings);
       try {
-        return await prepareAiWorkspaceImage(url, layout, (m) => processing.stage(m), {
-          applySafeZoneFill: options?.applySafeZoneFill,
-        });
+        if (options?.normalizeToAiTarget) {
+          return await prepareAiWorkspaceImage(url, layout, (m) => processing.stage(m));
+        }
+        return await addAlgorithmicBleed(url, layout, (m) => processing.stage(m));
       } catch (e) {
-        console.warn("prepareAiWorkspaceImage failed:", e);
-        toast.warning("Bleed algoritmic eșuat — folosesc imaginea AI.");
+        console.warn("applyAlgorithmicBleed failed:", e);
+        toast.warning("Bleed algoritmic eșuat — folosesc imaginea sursă.");
         try {
           return await ensureImageDataUrl(url);
         } catch {
@@ -586,11 +589,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       aiLog("AI result received", { len: dataUrl.length });
 
       processing.stage("Normalizez la rezoluția AI + bleed…");
-      const useSafeFill =
-        layoutSettings.addSafeZone !== false && (layoutSettings.safeMargin ?? 3) > 0;
       const finalized = await applyAlgorithmicBleed(dataUrl, {
         layoutSettings,
-        applySafeZoneFill: useSafeFill,
+        normalizeToAiTarget: true,
       });
       const displayUrl = finalized ?? dataUrl;
       setProcessedUrl(displayUrl);
@@ -1271,18 +1272,15 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         safeMargin: settings.safeMargin ?? 3,
       };
       setSettings(layoutSettings);
-      const useSafeFill =
-        layoutSettings.addSafeZone !== false && (layoutSettings.safeMargin ?? 3) > 0;
       const finalized = await applyAlgorithmicBleed(source, {
         layoutSettings,
-        applySafeZoneFill: useSafeFill,
       });
       if (!finalized) throw new Error("EMPTY_RESPONSE");
       setProcessedUrl(finalized);
       setPreviewUrl(finalized);
       setCanvasRevision((n) => n + 1);
       toast.dismiss(toastId);
-      processing.stage("Bleed algoritmic adăugat (extrapolare ultim pixel, fără safe sintetic).");
+      processing.stage("Bleed algoritmic adăugat (extrapolare din marginea imaginii).");
       void persistProcessedToHistory(finalized, "generative_fill", "bleed_algorithmic", {
         postProcess: "algorithmic_bleed",
       });
