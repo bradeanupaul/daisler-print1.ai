@@ -2174,17 +2174,18 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                 <div className="preview-stage relative flex min-h-0 flex-1 flex-col overflow-auto p-3 sm:p-6">
                   {canvasDisplayUrl ? (
                     <div className="flex min-h-0 w-full max-w-full flex-1 flex-col gap-3">
-                      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+                      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden [container-type:size]">
                         <div
-                          className="relative min-h-[8rem] min-w-[5rem] overflow-hidden bg-white shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all duration-300"
+                          className="relative overflow-hidden bg-white shadow-[0_20px_50px_rgba(0,0,0,0.5)] transition-all duration-300"
                           style={(() => {
                             const layout = getPrintLayoutFromSettings(settings);
                             const totalWmm = layout.netWidthMm + 2 * layout.bleedMm;
                             const totalHmm = layout.netHeightMm + 2 * layout.bleedMm;
+                            const ratio = totalWmm / totalHmm;
                             return {
                               aspectRatio: `${totalWmm} / ${totalHmm}`,
-                              maxWidth: "100%",
-                              maxHeight: "100%",
+                              width: `min(100cqw, calc(100cqh * ${ratio}))`,
+                              height: `min(100cqh, calc(100cqw / ${ratio}))`,
                             };
                           })()}
                         >
