@@ -2181,13 +2181,10 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             const layout = getPrintLayoutFromSettings(settings);
                             const totalWmm = layout.netWidthMm + 2 * layout.bleedMm;
                             const totalHmm = layout.netHeightMm + 2 * layout.bleedMm;
-                            const landscape = totalWmm >= totalHmm;
                             return {
                               aspectRatio: `${totalWmm} / ${totalHmm}`,
                               maxWidth: "100%",
                               maxHeight: "100%",
-                              width: landscape ? "100%" : "auto",
-                              height: landscape ? "auto" : "100%",
                             };
                           })()}
                         >
@@ -2219,10 +2216,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               ref={imgRef}
                               src={canvasDisplayUrl}
                               alt="Processed"
-                              width={canvasIntrinsicPx?.width}
-                              height={canvasIntrinsicPx?.height}
                               className={cn(
-                                "max-h-full max-w-full object-contain transition-opacity duration-300",
+                                "h-full w-full object-contain transition-opacity duration-300",
                                 settings.simulateCMYK && "simulate-cmyk",
                               )}
                               style={{ imageRendering: "auto" }}
