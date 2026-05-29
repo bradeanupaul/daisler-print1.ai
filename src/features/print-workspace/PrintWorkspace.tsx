@@ -104,6 +104,7 @@ import {
   computeEffectiveDpiForImage,
   getPrintLayoutFromSettings,
   prepareAiWorkspaceImage,
+  printSizeMmFromImagePixels,
   upscaleDataUrlToPrintPixels,
 } from '../../lib/printLayoutPostProcess';
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
@@ -347,25 +348,51 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           setProcessedUrl(url);
           
           const img = new Image();
-          img.onload = () => {
+          img.onload = async () => {
             setOriginalDimensions({ width: img.width, height: img.height });
-            // Check if upscale is needed
-            const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
-            const targetW = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
-            const targetH = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
             const targetDpi = resolveTargetDpi(settings.dpi);
-            
-            const effectiveDpi = Math.min(
-              img.width / (targetW / 25.4),
-              img.height / (targetH / 25.4)
+            const { widthMm, heightMm } = printSizeMmFromImagePixels(
+              img.width,
+              img.height,
+              targetDpi,
             );
-            
-            if (effectiveDpi < targetDpi * 0.9) { // 10% tolerance
+
+            setSettings((prev) => ({
+              ...prev,
+              formatId: "custom",
+              customWidth: widthMm,
+              customHeight: heightMm,
+            }));
+
+            const effectiveDpi = Math.min(
+              img.width / (widthMm / 25.4),
+              img.height / (heightMm / 25.4),
+            );
+
+            setIsUpscaleNeeded(false);
+            if (effectiveDpi < targetDpi * 0.9) {
               setIsUpscaleNeeded(true);
               if (settings.autoAIUpscale) {
                 handleUpscale();
               } else {
-                toast.info(`Rezoluție scăzută detectată (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`);
+                toast.info(
+                  `Rezoluție scăzută detectată (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`,
+                );
+              }
+            }
+
+            if (user && isSupabaseConfigured()) {
+              try {
+                const { groupId } = await registerUpload(user.uid, uploadedFile, "custom");
+                activeHistoryGroupIdRef.current = groupId;
+                onHistoryRefresh();
+              } catch (err) {
+                console.warn("registerUpload:", err);
+                toast.error(
+                  err instanceof Error
+                    ? err.message
+                    : "Nu s-a putut salva în istoric. Încearcă sign out + sign in.",
+                );
               }
             }
           };
@@ -375,24 +402,26 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       } else if (uploadedFile.type === 'application/pdf') {
         const pages = await renderPDFPage(buffer, 1);
         setTotalPages(pages);
+
+        if (user && isSupabaseConfigured()) {
+          try {
+            const { groupId } = await registerUpload(user.uid, uploadedFile, settings.formatId);
+            activeHistoryGroupIdRef.current = groupId;
+            onHistoryRefresh();
+          } catch (err) {
+            console.warn("registerUpload:", err);
+            toast.error(
+              err instanceof Error
+                ? err.message
+                : "Nu s-a putut salva în istoric. Încearcă sign out + sign in.",
+            );
+          }
+        }
       }
       
       toast.success(`File "${uploadedFile.name}" uploaded successfully`);
-
-      if (user && isSupabaseConfigured()) {
-        try {
-          const { groupId } = await registerUpload(user.uid, uploadedFile, settings.formatId);
-          activeHistoryGroupIdRef.current = groupId;
-          onHistoryRefresh();
-        } catch (err) {
-          console.warn("registerUpload:", err);
-          toast.error(
-            err instanceof Error ? err.message : "Nu s-a putut salva în istoric. Încearcă sign out + sign in.",
-          );
-        }
-      }
     }
-  }, [renderPDFPage, user, settings.formatId, onHistoryRefresh]);
+  }, [renderPDFPage, user, settings.dpi, settings.autoAIUpscale, settings.formatId, onHistoryRefresh]);
 
   const revokeObjectUrl = (url: string | null | undefined) => {
     if (url?.startsWith("blob:")) URL.revokeObjectURL(url);

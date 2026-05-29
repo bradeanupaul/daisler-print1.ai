@@ -40,6 +40,20 @@ export function mmToPx(mm: number, dpi: number): number {
   return Math.max(1, Math.round((mm / 25.4) * dpi));
 }
 
+/** Dimensiune tipar (mm) care păstrează rezoluția nativă a bitmap-ului la DPI-ul dat. */
+export function printSizeMmFromImagePixels(
+  widthPx: number,
+  heightPx: number,
+  dpi: number,
+): { widthMm: number; heightMm: number } {
+  const safeDpi = dpi > 0 ? dpi : 72;
+  const toMm = (px: number) => Math.round(((px / safeDpi) * 25.4) * 10) / 10;
+  return {
+    widthMm: toMm(Math.max(1, widthPx)),
+    heightMm: toMm(Math.max(1, heightPx)),
+  };
+}
+
 /**
  * Bleed în pixeli proporțional cu bitmap-ul net (nu mm×DPI tipar).
  * Necesar după normalizare la rezoluția AI (1000/1500/2000 pe latura lungă).
