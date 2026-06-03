@@ -25,4 +25,11 @@ export const DEFAULT_PRINT_SETTINGS: ProcessingSettings = {
   showCropMarks: false,
   pdfPageRange: "all",
   upscaleMode: "recompose",
+  impositionSheetId: "a3",
+  impositionSizeMode: "actual",
+  impositionRows: 2,
+  impositionCols: 2,
+  impositionSpacing: null,
+  customSheetWidth: null,
+  customSheetHeight: null,
 };

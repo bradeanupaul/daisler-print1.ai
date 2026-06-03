@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Upload, 
   FileText, 
@@ -58,7 +58,7 @@ import { collection, serverTimestamp, addDoc } from 'firebase/firestore';
 import { cn } from '../../lib/utils';
 import { hasAnyAiKeyConfigured } from '../../lib/aiKeys';
 import { 
-  PRINT_FORMATS, 
+  PRINT_FORMATS,
   MOCKUP_TYPES, 
   ProcessingSettings, 
   MockupType,
@@ -92,6 +92,7 @@ import * as openaiPrint from '../../services/openaiPrint';
 import { MockupViewer } from '../../components/MockupViewer';
 import { AiSettingsModal } from '../../components/AiSettingsModal';
 import { AiDualCompareDialog } from '../../components/AiDualCompareDialog';
+import { ImpositionExportDialog } from '../../components/ImpositionExportDialog';
 import { ProcessingOverlay } from '../../components/ProcessingOverlay';
 import { AiErrorBanner } from '../../components/AiErrorBanner';
 import { useProcessingProgress } from '../../hooks/useProcessingProgress';
@@ -109,6 +110,7 @@ import {
   upscaleDataUrlToPrintPixels,
 } from '../../lib/printLayoutPostProcess';
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
+import { computeImpositionGrid } from '../../lib/impositionLayout';
 import { pickUpscaleNetCanvasPixels } from '../../lib/upscaleCompose';
 
 const resolveTargetDpi = (dpi: ProcessingSettings['dpi']) => dpi ?? DEFAULT_PRINT_SETTINGS.dpi ?? 72;
@@ -186,6 +188,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const [formatPickerOpen, setFormatPickerOpen] = useState(false);
   const formatPickerRef = useRef<HTMLDivElement>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [impositionDialogOpen, setImpositionDialogOpen] = useState(false);
   type WorkspaceImageDualFlow = "upscale" | "generative_fill";
   const [dualImagePicker, setDualImagePicker] = useState<{
     flow: WorkspaceImageDualFlow;
@@ -796,68 +799,60 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     }
   };
 
+  const impositionPlan = useMemo(() => computeImpositionGrid(settings), [settings]);
+
   const handleImposition = async () => {
     if (!originalBuffer || !file) return;
     processing.begin("Calculez imposiția pe coală…");
-    const toastId = toast.loading("Calculating optimal imposition...");
+    const toastId = toast.loading("Calculez imposiția…");
     try {
-      const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
-      const itemW = (settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90) + (settings.bleed || 0) * 2;
-      const itemH = (settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50) + (settings.bleed || 0) * 2;
-      
-      const sheetWidth = settings.customSheetWidth || 297;
-      const sheetHeight = settings.customSheetHeight || 420;
-      
-      const spacing = settings.impositionSpacing || (settings.bleed || 0) * 2;
+      const plan = computeImpositionGrid(settings);
+      let finalRows = plan.rows;
+      let finalCols = plan.cols;
 
-      let finalRows = settings.impositionRows || 1;
-      let finalCols = settings.impositionCols || 1;
+      processing.stage(
+        plan.sizeMode === "fit"
+          ? "Plasez grid fit (imagini scalate în celule)…"
+          : "Calculez rânduri și coloane pe coală…",
+      );
 
-      processing.stage("Calculez rânduri și coloane pe coală…");
-      if (settings.autoMaximize) {
-        // Try normal orientation
-        const cols1 = Math.floor((sheetWidth + spacing) / (itemW + spacing));
-        const rows1 = Math.floor((sheetHeight + spacing) / (itemH + spacing));
-        const total1 = cols1 * rows1;
+      if (plan.total === 0) {
+        throw new Error(
+          plan.sizeMode === "fit"
+            ? "Grid fit invalid. Verifică rânduri, coloane și coală."
+            : "Articolul e prea mare pentru coală. Schimbă formatul sau coală.",
+        );
+      }
 
-        // Try rotated orientation
-        const cols2 = Math.floor((sheetWidth + spacing) / (itemH + spacing));
-        const rows2 = Math.floor((sheetHeight + spacing) / (itemW + spacing));
-        const total2 = cols2 * rows2;
+      if (plan.auto) {
+        setSettings((s) => ({
+          ...s,
+          impositionRows: finalRows,
+          impositionCols: finalCols,
+        }));
+      } else if (plan.sizeMode === "actual") {
+        const totalW =
+          finalCols * plan.itemWidthMm + (finalCols - 1) * plan.spacingMm;
+        const totalH =
+          finalRows * plan.itemHeightMm + (finalRows - 1) * plan.spacingMm;
 
-        if (total1 >= total2 && total1 > 0) {
-          finalRows = rows1;
-          finalCols = cols1;
-        } else if (total2 > total1) {
-          finalRows = rows2;
-          finalCols = cols2;
-        }
-        
-        if (finalRows * finalCols === 0) {
-          throw new Error("Item too large for sheet");
-        }
-        
-        setSettings(s => ({ ...s, impositionRows: finalRows, impositionCols: finalCols }));
-      } else {
-        // Manual validation
-        const totalW = finalCols * itemW + (finalCols - 1) * spacing;
-        const totalH = finalRows * itemH + (finalRows - 1) * spacing;
-        
-        if (totalW > sheetWidth || totalH > sheetHeight) {
-          throw new Error(`Manual imposition exceeds sheet size (${Math.round(totalW)}x${Math.round(totalH)}mm vs ${sheetWidth}x${sheetHeight}mm)`);
+        if (totalW > plan.sheetWidthMm || totalH > plan.sheetHeightMm) {
+          throw new Error(
+            `Imposiția manuală depășește coală (${Math.round(totalW)}×${Math.round(totalH)} mm vs ${plan.sheetWidthMm}×${plan.sheetHeightMm} mm)`,
+          );
         }
       }
 
       processing.stage("Generez PDF de imposiție…");
       const pdfBytes = await generateImpositionPDF(
         originalBuffer,
-        itemW,
-        itemH,
-        sheetWidth,
-        sheetHeight,
+        plan.itemWidthMm,
+        plan.itemHeightMm,
+        plan.sheetWidthMm,
+        plan.sheetHeightMm,
         finalRows,
         finalCols,
-        spacing,
+        plan.spacingMm,
         settings.bleed || 0,
         resolveTargetDpi(settings.dpi),
         false,
@@ -875,7 +870,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       URL.revokeObjectURL(url);
 
       toast.dismiss(toastId);
-      toast.success(`Imposition complete: ${finalRows * finalCols} items on sheet.`);
+      toast.success(`Imposiție gata: ${finalRows * finalCols} bucăți pe coală.`);
+      setImpositionDialogOpen(false);
     } catch (err: any) {
       console.error(err);
       toast.dismiss(toastId);
@@ -1354,7 +1350,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       if (result.action === 'process') handleDownload();
       if (result.action === 'upscale') handleUpscale();
       if (result.action === 'download') handleDownload();
-      if (result.action === 'imposition') handleImposition();
+      if (result.action === 'imposition') setImpositionDialogOpen(true);
 
       // Speak response
       const audio = await generateSpeech(result.reply);
@@ -1796,7 +1792,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           onClick={() => {
                             setExportMenuOpen(false);
                             setMobileSidebarOpen(false);
-                            void handleImposition();
+                            setImpositionDialogOpen(true);
                           }}
                           className={cn(
                             "flex w-full items-center gap-3 rounded-xl border p-2.5 text-left transition-colors",
@@ -1815,7 +1811,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           <div className="min-w-0 flex-1">
                             <span className="block text-xs font-semibold text-[var(--text)]">PDF imposiție</span>
                             <span className="mt-0.5 block text-[10px] leading-snug text-[var(--text-muted)]">
-                              Mai multe exemplare pe coală (setări secțiunea Imposiție) · .pdf
+                              Deschide setări + previzualizare · .pdf
                             </span>
                           </div>
                           <Layers className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
@@ -2647,6 +2643,26 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           />
         )}
       </AnimatePresence>
+
+      <ImpositionExportDialog
+        open={impositionDialogOpen}
+        onClose={() => {
+          if (!isProcessing) setImpositionDialogOpen(false);
+        }}
+        settings={settings}
+        onSettingsChange={setSettings}
+        plan={impositionPlan}
+        previewUrl={processedUrl || previewUrl}
+        fileName={file?.name}
+        onExport={() => void handleImposition()}
+        exporting={isProcessing}
+        canExport={
+          !!file &&
+          !!originalBuffer &&
+          impositionPlan.total > 0 &&
+          !!PRINT_FORMATS.find((f) => f.id === settings.formatId)?.isPaper
+        }
+      />
 
       <AiDualCompareDialog
         open={!!dualImagePicker}

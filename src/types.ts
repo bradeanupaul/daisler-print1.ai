@@ -50,6 +50,9 @@ export const IMPOSITION_SHEETS = [
 /** AI Upscale: păstrează tot conținutul și outpainting pe margini vs. regândire compoziție. */
 export type UpscaleMode = 'extend' | 'recompose';
 
+/** Imposiție: dimensiune reală a formatului vs. scalează în celule pentru N×M bucăți. */
+export type ImpositionSizeMode = 'actual' | 'fit';
+
 export interface ProcessingSettings {
   formatId: string;
   customWidth: number | null;
@@ -76,6 +79,7 @@ export interface ProcessingSettings {
   impositionCols?: number | null;
   impositionSpacing?: number | null;
   impositionSheetId?: string;
+  impositionSizeMode?: ImpositionSizeMode;
   customSheetWidth?: number | null;
   customSheetHeight?: number | null;
   pdfPageRange: 'all' | 'current';
