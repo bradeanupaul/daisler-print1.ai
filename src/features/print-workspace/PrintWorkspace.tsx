@@ -672,7 +672,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         bufferToUse = await response.arrayBuffer();
       }
 
-      processing.stage("Generez PDF cu bleed și marcaje…");
+      processing.stage("Generez PDF pentru tipar…");
       const pdfBytes = await generatePrintPDF(
         [bufferToUse],
         width,
@@ -680,10 +680,10 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         settings.bleed || 0,
         settings.safeMargin || 0,
         resolveTargetDpi(settings.dpi),
-        settings.addCutLine,
-        settings.addSafeZone,
+        false,
+        false,
         settings.cutLineColor,
-        settings.showCropMarks,
+        false,
         file.type === 'application/pdf' && settings.pdfPageRange === 'current' ? currentPage - 1 : 'all'
       );
 
@@ -693,38 +693,44 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       a.href = url;
       a.download = `print_${file.name.split('.')[0]}.pdf`;
       a.click();
-      
-      if (user) {
-        const historyPath = `users/${user.uid}/history`;
-        try {
-          await addDoc(collection(db, historyPath), {
-            userId: user.uid,
-            fileName: file.name,
-            format: settings.formatId,
-            createdAt: serverTimestamp(),
-            timestamp: serverTimestamp(),
-            type: 'pdf_export',
-          });
-        } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, historyPath);
-        }
+      URL.revokeObjectURL(url);
 
-        if (isSupabaseConfigured()) {
-          const pdfBlob = new Blob([pdfBytes], { type: "application/pdf" });
-          await registerBlobExport(
-            user.uid,
-            activeHistoryGroupIdRef.current,
-            `print_${file.name.split(".")[0]}.pdf`,
-            "pdf_export",
-            pdfBlob,
-            settings.formatId,
-          );
-          onHistoryRefresh();
-        }
+      toast.success("PDF descărcat.");
+
+      if (user) {
+        void (async () => {
+          const historyPath = `users/${user.uid}/history`;
+          try {
+            await addDoc(collection(db, historyPath), {
+              userId: user.uid,
+              fileName: file.name,
+              format: settings.formatId,
+              createdAt: serverTimestamp(),
+              timestamp: serverTimestamp(),
+              type: 'pdf_export',
+            });
+          } catch (error) {
+            handleFirestoreError(error, OperationType.WRITE, historyPath);
+          }
+
+          if (isSupabaseConfigured()) {
+            try {
+              const pdfBlob = new Blob([pdfBytes], { type: "application/pdf" });
+              await registerBlobExport(
+                user.uid,
+                activeHistoryGroupIdRef.current,
+                `print_${file.name.split(".")[0]}.pdf`,
+                "pdf_export",
+                pdfBlob,
+                settings.formatId,
+              );
+              onHistoryRefresh();
+            } catch (err) {
+              console.warn("registerBlobExport:", err);
+            }
+          }
+        })();
       }
-      
-      processing.stage("PDF generat cu succes.");
-      toast.success("Print-ready PDF generated!");
     } catch (err) {
       console.error(err);
       toast.error("Failed to generate PDF");
@@ -764,20 +770,26 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       a.click();
       URL.revokeObjectURL(url);
 
-      if (user && isSupabaseConfigured() && activeHistoryGroupIdRef.current) {
-        const base = (file?.name || "document").replace(/\.[^/.]+$/, "");
-        await registerBlobExport(
-          user.uid,
-          activeHistoryGroupIdRef.current,
-          `preview_${base}.${ext}`,
-          "image_export",
-          blob,
-          settings.formatId,
-        );
-        onHistoryRefresh();
-      }
-
       toast.success("Imagine descărcată.");
+
+      if (user && isSupabaseConfigured() && activeHistoryGroupIdRef.current) {
+        void (async () => {
+          try {
+            const base = (file?.name || "document").replace(/\.[^/.]+$/, "");
+            await registerBlobExport(
+              user.uid,
+              activeHistoryGroupIdRef.current,
+              `preview_${base}.${ext}`,
+              "image_export",
+              blob,
+              settings.formatId,
+            );
+            onHistoryRefresh();
+          } catch (err) {
+            console.warn("registerBlobExport:", err);
+          }
+        })();
+      }
     } catch (err) {
       console.error(err);
       toast.error("Nu s-a putut exporta imaginea.");
@@ -848,7 +860,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         spacing,
         settings.bleed || 0,
         resolveTargetDpi(settings.dpi),
-        settings.showCropMarks,
+        false,
         currentPage - 1
       );
 
@@ -860,8 +872,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       a.href = url;
       a.download = `imposition_${file.name.split('.')[0]}.pdf`;
       a.click();
-      
-      processing.stage(`Imposiție: ${finalRows * finalCols} bucăți pe coală.`);
+      URL.revokeObjectURL(url);
+
       toast.dismiss(toastId);
       toast.success(`Imposition complete: ${finalRows * finalCols} items on sheet.`);
     } catch (err: any) {
@@ -1764,7 +1776,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           <div className="min-w-0 flex-1">
                             <span className="block text-xs font-semibold text-[var(--text)]">PDF tipăribil</span>
                             <span className="mt-0.5 block text-[10px] leading-snug text-[var(--text-muted)]">
-                              Format setat, bleed, safe, ghidaje · .pdf
+                              Format setat, bleed · fără ghidaje în fișier · .pdf
                             </span>
                           </div>
                           <Download className="h-4 w-4 shrink-0 text-[var(--text-muted)]" aria-hidden />
@@ -2135,14 +2147,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             Panou AI
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={handleDownload}
-                          className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-white/5 px-3 py-1.5 text-xs font-bold hover:bg-white/10"
-                        >
-                          <Download className="h-4 w-4" />
-                          PDF
-                        </button>
                         <button
                           type="button"
                           onClick={() => open()}
