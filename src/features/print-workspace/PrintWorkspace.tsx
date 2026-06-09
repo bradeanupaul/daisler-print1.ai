@@ -83,6 +83,7 @@ import {
 import { 
   processAgentMessage, 
   analyzePrintQuality, 
+  aiGenerativeBleed,
   upscaleImage,
   generateSpeech,
   refineGeminiImageFromPrompt,
@@ -103,10 +104,15 @@ import { aiError, aiLog } from '../../lib/aiUpscaleLog';
 import { ensureImageDataUrl } from '../../lib/imageDataUrl';
 import {
   addAlgorithmicBleed,
+  artworkIncludesBleedMargins,
   computeEffectiveDpiForImage,
   getPrintLayoutFromSettings,
+  normalizeImageDataUrlToExactPixels,
+  normalizeNetArtworkForBleed,
   prepareAiWorkspaceImage,
   printSizeMmFromImagePixels,
+  getAiBleedCanvasPixels,
+  sealNetArtworkOnBleedOutput,
   upscaleDataUrlToPrintPixels,
 } from '../../lib/printLayoutPostProcess';
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
@@ -189,7 +195,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const formatPickerRef = useRef<HTMLDivElement>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [impositionDialogOpen, setImpositionDialogOpen] = useState(false);
-  type WorkspaceImageDualFlow = "upscale" | "generative_fill";
+  type WorkspaceImageDualFlow = "upscale" | "ai_bleed";
   const [dualImagePicker, setDualImagePicker] = useState<{
     flow: WorkspaceImageDualFlow;
     dual: Extract<UpscaleGenerationResult, { kind: "dual" }>;
@@ -223,6 +229,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const agentInputRef = useRef<HTMLInputElement>(null);
   const activeHistoryGroupIdRef = useRef<string | null>(null);
   const lastAiGenerationUsageRef = useRef<AiUsageSummary | null>(null);
+  const lastNetArtworkForBleedRef = useRef<string | null>(null);
   // API Key Check (Gemini din .env / storage sau OpenAI)
   useEffect(() => {
     setHasKey(hasAnyAiKeyConfigured());
@@ -506,17 +513,18 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const persistDualAiVariantsToHistory = useCallback(
     async (
       dual: Extract<UpscaleGenerationResult, { kind: "dual" }>,
-      flow: "upscale" | "generative_fill",
+      flow: WorkspaceImageDualFlow,
       mode?: UpscaleMode,
     ) => {
       const usageSnapshot = lastAiGenerationUsageRef.current;
       const baseMeta = { flow, mode, stage: "ai_output_before_pick" as const };
+      const sourceKind = flow === "upscale" ? "upscale" : "generative_fill";
       if (dual.gemini.imageUrl) {
         lastAiGenerationUsageRef.current = usageSnapshot;
         await persistProcessedToHistory(
           dual.gemini.imageUrl,
-          flow === "upscale" ? "upscale" : "generative_fill",
-          `ai_gemini_${mode ?? "variant"}`,
+          sourceKind,
+          flow === "ai_bleed" ? "ai_bleed_gemini" : `ai_gemini_${mode ?? "variant"}`,
           { ...baseMeta, provider: "gemini" },
           { clearUsageAfter: false },
         );
@@ -525,8 +533,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         lastAiGenerationUsageRef.current = usageSnapshot;
         await persistProcessedToHistory(
           dual.openai.imageUrl,
-          flow === "upscale" ? "upscale" : "generative_fill",
-          `ai_openai_${mode ?? "variant"}`,
+          sourceKind,
+          flow === "ai_bleed" ? "ai_bleed_openai" : `ai_openai_${mode ?? "variant"}`,
           { ...baseMeta, provider: "openai" },
           { clearUsageAfter: false },
         );
@@ -620,6 +628,72 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       return finalized ?? dataUrl;
     },
     [applyAlgorithmicBleed, processing, persistProcessedToHistory, settings],
+  );
+
+  const finalizeAiBleedOutput = useCallback(
+    async (
+      url: string | null,
+      meta?: { provider?: string; historyLabel?: string },
+      netArtworkUrl?: string | null,
+    ): Promise<string | null> => {
+      if (!url) return null;
+      const layoutSettings: ProcessingSettings = {
+        ...settings,
+        showBleedGuide: true,
+        showSafeGuide: true,
+        addSafeZone: true,
+        bleed: settings.bleed ?? 3,
+        safeMargin: settings.safeMargin ?? 3,
+      };
+      setSettings(layoutSettings);
+
+      const layout = getPrintLayoutFromSettings(layoutSettings);
+      const { totalW: targetW, totalH: targetH } = getAiBleedCanvasPixels(layout);
+
+      let dataUrl: string;
+      try {
+        dataUrl = await ensureImageDataUrl(url);
+      } catch (e) {
+        console.warn("ensureImageDataUrl:", e);
+        dataUrl = url;
+      }
+
+      const netSource = netArtworkUrl ?? lastNetArtworkForBleedRef.current;
+      let normalized: string;
+      if (netSource) {
+        processing.stage("Sigilez centrul cu arta originală…");
+        normalized = await sealNetArtworkOnBleedOutput(
+          dataUrl,
+          netSource,
+          layout,
+          targetW,
+          targetH,
+        );
+      } else {
+        processing.stage(`Normalizez la ${targetW}×${targetH}px (bleed AI inclus)…`);
+        normalized = await normalizeImageDataUrlToExactPixels(dataUrl, targetW, targetH);
+      }
+      lastNetArtworkForBleedRef.current = null;
+      setProcessedUrl(normalized);
+      setPreviewUrl(normalized);
+      setCanvasRevision((n) => n + 1);
+      setIsUpscaleNeeded(false);
+
+      if (meta?.historyLabel) {
+        void persistProcessedToHistory(dataUrl, "generative_fill", `${meta.historyLabel}_ai_raw`, {
+          provider: meta.provider,
+          stage: "ai_output",
+          postProcess: "ai_bleed",
+        }, { clearUsageAfter: false });
+        void persistProcessedToHistory(normalized, "generative_fill", meta.historyLabel, {
+          provider: meta.provider,
+          postProcess: "ai_bleed",
+          stage: "after_normalize",
+        });
+      }
+      return normalized;
+    },
+    [processing, persistProcessedToHistory, settings],
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({ 
@@ -1188,16 +1262,15 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         });
         processing.done();
         toast.success("Upscale gata — bleed algoritmic + ghidaje active.");
-      } else {
-        const finalized = await applyAlgorithmicBleed(url);
-        setProcessedUrl(finalized);
-        setPreviewUrl(finalized);
-        setCanvasRevision((n) => n + 1);
-        void persistProcessedToHistory(finalized!, "generative_fill", "pick_gemini", {
-          provider: "gemini",
-          postProcess: "algorithmic_bleed",
-        });
-        toast.success("Variantă aplicată.");
+      } else if (flow === "ai_bleed") {
+        processing.begin("Finalizez bleed AI…");
+        await finalizeAiBleedOutput(
+          url,
+          { provider: "gemini", historyLabel: "pick_gemini" },
+          lastNetArtworkForBleedRef.current,
+        );
+        processing.done();
+        toast.success("Bleed AI aplicat.");
       }
     } catch (err) {
       aiError("finalizeWorkspaceDualPickGemini", err);
@@ -1224,16 +1297,15 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         });
         processing.done();
         toast.success("Upscale gata — bleed algoritmic + ghidaje active.");
-      } else {
-        const finalized = await applyAlgorithmicBleed(url);
-        setProcessedUrl(finalized);
-        setPreviewUrl(finalized);
-        setCanvasRevision((n) => n + 1);
-        void persistProcessedToHistory(finalized!, "generative_fill", "pick_openai", {
-          provider: "openai",
-          postProcess: "algorithmic_bleed",
-        });
-        toast.success("Variantă aplicată.");
+      } else if (flow === "ai_bleed") {
+        processing.begin("Finalizez bleed AI…");
+        await finalizeAiBleedOutput(
+          url,
+          { provider: "openai", historyLabel: "pick_openai" },
+          lastNetArtworkForBleedRef.current,
+        );
+        processing.done();
+        toast.success("Bleed AI aplicat.");
       }
     } catch (err) {
       aiError("finalizeWorkspaceDualPickOpenai", err);
@@ -1260,7 +1332,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     );
   };
 
-  const handleGenerativeFill = async () => {
+  const handleAlgorithmicBleed = async () => {
     const source = processedUrl || previewUrl;
     if (!source) return;
     const bleedMm = settings.bleed ?? 3;
@@ -1268,8 +1340,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       toast.error("Setează bleed (mm) înainte de a genera marginile.");
       return;
     }
-    processing.begin("Adaug bleed algoritmic…");
-    const toastId = toast.loading(`Adaug bleed (${bleedMm} mm pe latură)…`);
+    processing.begin("Adaug bleed rapid…");
+    const toastId = toast.loading(`Bleed rapid (${bleedMm} mm pe latură)…`);
     try {
       const layoutSettings: ProcessingSettings = {
         ...settings,
@@ -1288,14 +1360,112 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       setPreviewUrl(finalized);
       setCanvasRevision((n) => n + 1);
       toast.dismiss(toastId);
-      processing.stage("Bleed algoritmic adăugat (extrapolare din marginea imaginii).");
+      processing.stage("Bleed rapid adăugat (extrapolare din marginea imaginii).");
       void persistProcessedToHistory(finalized, "generative_fill", "bleed_algorithmic", {
         postProcess: "algorithmic_bleed",
       });
     } catch (err) {
       toast.dismiss(toastId);
-      aiError("handleGenerativeFill", err);
+      aiError("handleAlgorithmicBleed", err);
       showWorkspaceAiError(err);
+      return;
+    }
+    processing.done();
+  };
+
+  const handleAiGenerativeBleed = async () => {
+    const source = processedUrl || previewUrl;
+    if (!source) {
+      toast.error("Încarcă mai întâi un fișier.");
+      return;
+    }
+    if (!hasAnyAiKeyConfigured()) {
+      toast.error("Adaugă o cheie API (Gemini sau OpenAI).");
+      handleSelectKey();
+      return;
+    }
+    const bleedMm = settings.bleed ?? 3;
+    if (bleedMm <= 0) {
+      toast.error("Setează bleed (mm) în sidebar înainte de Bleed AI.");
+      return;
+    }
+
+    const currentFormat = PRINT_FORMATS.find((f) => f.id === settings.formatId);
+    const netW =
+      settings.formatId === "custom" ? settings.customWidth || 90 : currentFormat?.width || 90;
+    const netH =
+      settings.formatId === "custom" ? settings.customHeight || 50 : currentFormat?.height || 50;
+    const formatName = currentFormat?.name || "Custom";
+    const targetDpi = resolveTargetDpi(settings.dpi);
+    const safeMargin = settings.addSafeZone ? (settings.safeMargin ?? 3) : 0;
+
+    const layoutSettings: ProcessingSettings = {
+      ...settings,
+      bleed: bleedMm,
+    };
+    const bleedLayout = getPrintLayoutFromSettings(layoutSettings);
+    let netArtworkUrl: string;
+    try {
+      netArtworkUrl = await normalizeNetArtworkForBleed(source, bleedLayout, (m) =>
+        processing.stage(m),
+      );
+      lastNetArtworkForBleedRef.current = netArtworkUrl;
+    } catch (err) {
+      aiError("normalizeNetArtworkForBleed", err);
+      showWorkspaceAiError(err);
+      return;
+    }
+
+    setWorkspaceAiError(null);
+    processing.begin(`Pornesc Bleed AI (${bleedMm} mm/latură)…`);
+    const toastId = toast.loading(`Bleed AI (${bleedMm} mm)…`);
+
+    try {
+      const result = await aiGenerativeBleed(
+        source,
+        netW,
+        netH,
+        formatName,
+        bleedMm,
+        processing.getReporter(),
+        targetDpi,
+        safeMargin,
+      );
+      lastAiGenerationUsageRef.current = processing.getUsageSummary();
+
+      if (result.kind === "dual") {
+        toast.dismiss(toastId);
+        processing.stage("Variante Gemini și OpenAI gata — alege în dialog.");
+        const gUrl = result.gemini.imageUrl;
+        const oUrl = result.openai.imageUrl;
+        if (!gUrl && !oUrl) {
+          showWorkspaceAiError("Bleed AI: ambele modele au eșuat.");
+          processing.stop();
+          return;
+        }
+        void persistDualAiVariantsToHistory(result, "ai_bleed");
+        processing.done();
+        setDualImagePicker({ flow: "ai_bleed", dual: result });
+        toast.success("Variante bleed AI gata — alege în dialog.");
+        return;
+      }
+
+      if (result.imageUrl) {
+        await finalizeAiBleedOutput(
+          result.imageUrl,
+          { provider: result.provider, historyLabel: "ai_bleed" },
+          netArtworkUrl,
+        );
+        toast.dismiss(toastId);
+        toast.success(`Bleed AI gata (${bleedMm} mm pe latură).`);
+      } else {
+        throw new Error("EMPTY_RESPONSE");
+      }
+    } catch (err) {
+      toast.dismiss(toastId);
+      aiError("handleAiGenerativeBleed", err);
+      showWorkspaceAiError(err);
+      processing.stop();
       return;
     }
     processing.done();
@@ -1638,12 +1808,25 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleGenerativeFill()}
+                  onClick={() => void handleAiGenerativeBleed()}
                   disabled={isProcessing || !canvasDisplayUrl}
-                  className="sidebar-action" data-active="false"
+                  className="sidebar-action"
+                  data-active={settings.generativeBleed ? "true" : "false"}
+                  title="AI extinde arta net cu bleed generativ (fără canvas alb pre-completat)"
                 >
                   <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  AI Bleed
+                  Bleed AI
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleAlgorithmicBleed()}
+                  disabled={isProcessing || !canvasDisplayUrl}
+                  className="sidebar-action"
+                  data-active="false"
+                  title="Extrapolare rapidă: ultimul pixel de pe margini (fără API)"
+                >
+                  <Zap className="h-3.5 w-3.5 shrink-0 opacity-70" />
+                  Bleed rapid
                 </button>
           </section>
 
@@ -2209,20 +2392,49 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                             </div>
                           )}
 
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <img
-                              key={`canvas-${canvasRevision}`}
-                              ref={imgRef}
-                              src={canvasDisplayUrl}
-                              alt="Processed"
-                              className={cn(
-                                "h-full w-full object-contain transition-opacity duration-300",
-                                settings.simulateCMYK && "simulate-cmyk",
-                              )}
-                              style={{ imageRendering: "auto" }}
-                              draggable={false}
-                            />
-                          </div>
+                          {(() => {
+                            const layout = getPrintLayoutFromSettings(settings);
+                            const bleed = layout.bleedMm;
+                            const totalWmm = layout.netWidthMm + 2 * bleed;
+                            const totalHmm = layout.netHeightMm + 2 * bleed;
+                            const bleedPercentX = bleed > 0 ? (bleed / totalWmm) * 100 : 0;
+                            const bleedPercentY = bleed > 0 ? (bleed / totalHmm) * 100 : 0;
+                            const fillsTotal =
+                              canvasIntrinsicPx !== null &&
+                              artworkIncludesBleedMargins(
+                                canvasIntrinsicPx.width,
+                                canvasIntrinsicPx.height,
+                                layout,
+                              );
+                            const frameStyle = fillsTotal
+                              ? { inset: 0 }
+                              : bleed > 0
+                                ? {
+                                    top: `${bleedPercentY}%`,
+                                    left: `${bleedPercentX}%`,
+                                    right: `${bleedPercentX}%`,
+                                    bottom: `${bleedPercentY}%`,
+                                  }
+                                : { inset: 0 };
+
+                            return (
+                              <div className="absolute overflow-hidden" style={frameStyle}>
+                                <img
+                                  key={`canvas-${canvasRevision}`}
+                                  ref={imgRef}
+                                  src={canvasDisplayUrl}
+                                  alt="Processed"
+                                  className={cn(
+                                    "h-full w-full transition-opacity duration-300",
+                                    fillsTotal ? "object-contain" : "object-cover",
+                                    settings.simulateCMYK && "simulate-cmyk",
+                                  )}
+                                  style={{ imageRendering: "auto" }}
+                                  draggable={false}
+                                />
+                              </div>
+                            );
+                          })()}
 
                           {((settings.showBleedGuide ?? settings.showGuides) ||
                             (settings.showSafeGuide ?? settings.showGuides)) && (
@@ -2670,12 +2882,12 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         title={
           dualImagePicker?.flow === "upscale"
             ? "Compară rezultate AI Upscale"
-            : "Compară rezultate AI Bleed"
+            : "Compară rezultate Bleed AI"
         }
         subtitle={
           dualImagePicker?.flow === "upscale"
             ? "Alege varianta Gemini sau OpenAI. Poți descrie modificări punctuale sub fiecare imagine înainte de a alege."
-            : "Alege varianta pentru marginile de bleed. Poți rafina fiecare coloană cu un prompt înainte de a confirma."
+            : "Alege varianta pentru bleed generativ. Poți rafina fiecare coloană cu un prompt înainte de a confirma."
         }
         gemini={{
           imageUrl: dualImagePicker?.dual.gemini.imageUrl ?? null,

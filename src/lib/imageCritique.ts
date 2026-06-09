@@ -1,5 +1,7 @@
 import type { UpscalePromptMode } from "./aiUpscalePrompts";
 
+export type ImageCritiqueMode = UpscalePromptMode | "bleed";
+
 export type ImageCritiqueResult = {
   shouldRegenerate: boolean;
   issues: string[];
@@ -7,8 +9,16 @@ export type ImageCritiqueResult = {
 };
 
 /** Ce trimitem la modelul QA (vision). */
+const BLEED_QA = `
+BLEED EXPAND QA (compare ORIGINAL net art vs OUTPUT with bleed):
+- ORIGINAL is net trim only; OUTPUT must be wider/taller with bleed margins added.
+- Center net artwork: same subjects, colors, style — not shrunk into a miniature.
+- New outer margins: natural continuation of edge pixels — NOT abstract marbled filler, pixel smear, mirror, or stretch.
+- REGENERATE if: marbled/swirly unrelated bleed; pixel smear or mirror; white borders or empty margins; blur halo or miniature center; center moved/rescaled; new subjects/text in center.
+`;
+
 export type ImageCritiqueRequest = {
-  mode: UpscalePromptMode;
+  mode: ImageCritiqueMode;
   /** Promptul folosit la generare — OUTPUT trebuie să îl respecte. */
   intentSummary: string;
   /** Imaginea sursă înainte de pasul AI (ground truth conținut). */
@@ -31,7 +41,12 @@ RECOMPOSE QA (compare ORIGINAL vs OUTPUT):
 `;
 
 export function buildImageCritiqueInstruction(request: ImageCritiqueRequest): string {
-  const modeBlock = request.mode === "extend" ? EXTEND_QA : RECOMPOSE_QA;
+  const modeBlock =
+    request.mode === "bleed"
+      ? BLEED_QA
+      : request.mode === "extend"
+        ? EXTEND_QA
+        : RECOMPOSE_QA;
   return `You are strict QA for AI image resizing (print / marketing artwork).
 
 MODE: ${request.mode.toUpperCase()}

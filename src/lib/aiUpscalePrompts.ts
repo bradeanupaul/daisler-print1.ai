@@ -173,6 +173,67 @@ ${NEGATIVE_RECOMPOSE}
 QUALITY TARGET: Professionally art-directed adaptation for the new format using only original assets.`;
 }
 
+export type AiBleedPromptContext = {
+  formatName: string;
+  netW: number;
+  netH: number;
+  bleedMm: number;
+  canvasPxW: number;
+  canvasPxH: number;
+  safeMarginMm?: number;
+};
+
+function buildAiBleedPremium(ctx: AiBleedPromptContext): string {
+  const totalW = ctx.netW + 2 * ctx.bleedMm;
+  const totalH = ctx.netH + 2 * ctx.bleedMm;
+  const safeBlock = buildPrintSafeZonePromptBlock({
+    netWidthMm: ctx.netW,
+    netHeightMm: ctx.netH,
+    safeMarginMm: ctx.safeMarginMm,
+    inputHasSafeGuide: (ctx.safeMarginMm ?? 0) > 0,
+  });
+  return `TARGET PRINT: net trim ${ctx.netW}×${ctx.netH} mm (${ctx.formatName}).
+BLEED: ${ctx.bleedMm} mm on each side → total sheet ${totalW}×${totalH} mm.
+OUTPUT FRAME: ${ctx.canvasPxW}×${ctx.canvasPxH} px (full bleed included).
+
+TASK — EXPAND NET ARTWORK WITH PRINT BLEED
+
+INPUT: the NET TRIM artwork only (no bleed margins yet).
+OUTPUT: expand the canvas to ${ctx.canvasPxW}×${ctx.canvasPxH} px by adding ${ctx.bleedMm} mm bleed on EACH side.
+
+Naturally continue the illustration at all four edges — textures, colors, lighting, brush strokes, line work, and style must flow outward seamlessly. The original net artwork content must remain intact at the same relative scale in the center (not shrunk into a miniature).
+
+ALLOWED:
+- generative outpaint in the new outer margin areas only
+- organic edge continuation matching the existing illustration style
+- print-ready seamless bleed for trimming
+
+FORBIDDEN:
+- pixel-stretch, smear, mirror reflection, or 1px extrapolation
+- abstract marbled/swirly filler unrelated to the edge pixels
+- blur, glow, halo, vignette, or soft shadow around the artwork
+- shrinking the design into a miniature with a blurred copy behind it
+- white borders, empty margins, or letterboxing anywhere in the output
+- any change, recrop, or redesign inside the original net artwork
+- new objects, text, logos, or hallucinated details in the center
+
+The result must look like the same illustration extended outward — edge pixels continued naturally.
+
+${safeBlock ? `\n${safeBlock}\n` : ""}
+QUALITY TARGET: Production-ready print file with ${ctx.bleedMm} mm bleed; center identical to input; bleed bands seamless at trim.`;
+}
+
+/** Prompt dedicat bleed generativ (margini exterioare doar). */
+export function buildAiBleedPrompt(
+  ctx: AiBleedPromptContext,
+  tier: UpscalePromptTier = resolveUpscalePromptTier(),
+): string {
+  if (tier === "short") {
+    return `Expand net ${ctx.netW}×${ctx.netH}mm (${ctx.formatName}) with ${ctx.bleedMm}mm bleed/side. Outpaint edges naturally to ${ctx.canvasPxW}×${ctx.canvasPxH}px. Keep center art unchanged. No smear/marble/white borders.`;
+  }
+  return buildAiBleedPremium(ctx);
+}
+
 /** Prompt universal upscale — același text pentru OpenAI și Gemini. */
 export function buildUpscalePrompt(
   mode: UpscalePromptMode,

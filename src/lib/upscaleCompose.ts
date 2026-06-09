@@ -156,6 +156,82 @@ export async function composeExtendOutpaintCanvas(
   });
 }
 
+/**
+ * Bleed AI: canvas la raport total (net + 2×bleed mm). Artă în zona net (centru); benzile exterioare = outpaint.
+ */
+export async function composeBleedOutpaintCanvas(
+  sourceDataUrl: string,
+  canvasW: number,
+  canvasH: number,
+  netWmm: number,
+  netHmm: number,
+  bleedMm: number,
+  opts?: ComposeAiCanvasOpts,
+): Promise<{ dataUrl: string }> {
+  const totalWmm = netWmm + 2 * bleedMm;
+  const totalHmm = netHmm + 2 * bleedMm;
+  const bleedPxX = Math.max(1, Math.round(canvasW * (bleedMm / Math.max(totalWmm, 1e-6))));
+  const bleedPxY = Math.max(1, Math.round(canvasH * (bleedMm / Math.max(totalHmm, 1e-6))));
+  const innerW = Math.max(1, canvasW - 2 * bleedPxX);
+  const innerH = Math.max(1, canvasH - 2 * bleedPxY);
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas 2D indisponibil"));
+        return;
+      }
+      const nw = img.naturalWidth || img.width;
+      const nh = img.naturalHeight || img.height;
+      if (!nw || !nh) {
+        reject(new Error("Dimensiuni imagine invalide"));
+        return;
+      }
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvasW, canvasH);
+
+      // Cover: umple zona net; alb doar în benzile exterioare de bleed (nu letterbox în centru).
+      const scale = Math.max(innerW / nw, innerH / nh);
+      const dw = nw * scale;
+      const dh = nh * scale;
+      const dx = bleedPxX + (innerW - dw) / 2;
+      const dy = bleedPxY + (innerH - dh) / 2;
+      ctx.drawImage(img, dx, dy, dw, dh);
+
+      const safe = opts?.safeMarginMm ?? 0;
+      if (safe > 0 && netWmm > 0 && netHmm > 0) {
+        const insetX = Math.max(1, Math.round((safe / netWmm) * innerW));
+        const insetY = Math.max(1, Math.round((safe / netHmm) * innerH));
+        if (insetX * 2 < innerW && insetY * 2 < innerH) {
+          ctx.save();
+          ctx.strokeStyle = "rgba(251, 146, 60, 0.62)";
+          ctx.lineWidth = Math.max(1, Math.round(canvasW / 420));
+          const dash = ctx.lineWidth * 5;
+          ctx.setLineDash([dash, dash * 0.75]);
+          ctx.strokeRect(
+            bleedPxX + insetX + 0.5,
+            bleedPxY + insetY + 0.5,
+            innerW - 2 * insetX - 1,
+            innerH - 2 * insetY - 1,
+          );
+          ctx.restore();
+        }
+      }
+
+      resolve({ dataUrl: canvas.toDataURL("image/png") });
+    };
+    img.onerror = () => reject(new Error("Încărcare imagine eșuată"));
+    img.src = sourceDataUrl;
+  });
+}
+
 /** @deprecated Folosește composeExtendOutpaintCanvas */
 export async function composeExtendCenterContain(
   sourceDataUrl: string,

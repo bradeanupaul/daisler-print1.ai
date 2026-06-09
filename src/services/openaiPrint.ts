@@ -28,8 +28,13 @@ import {
   resolvePrintGenerationProfile,
 } from "../lib/printGenerationProfile";
 import { prepareImageForAiUpscale } from "../lib/imageDataUrl";
-import { buildUpscalePrompt } from "../lib/aiUpscalePrompts";
-import { prepareAiWorkspaceImage, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
+import {
+  getAiBleedCanvasPixels,
+  normalizeNetArtworkForBleed,
+  prepareNetArtworkForAiBleedInner,
+  type PrintLayoutMm,
+} from "../lib/printLayoutPostProcess";
+import { buildAiBleedPrompt, buildUpscalePrompt } from "../lib/aiUpscalePrompts";
 import {
   composeExtendOutpaintCanvas,
   composeRecomposeCanvasForGemini,
@@ -478,25 +483,64 @@ export async function upscaleImage(
   return url;
 }
 
-export async function generativeFill(
+export async function aiGenerativeBleed(
   imageData: string,
+  netW: number,
+  netH: number,
+  formatName: string,
   bleedMm: number,
-  targetWidthMm: number,
-  targetHeightMm: number,
   reporter?: ProcessingStageReporter,
   targetDpi?: number,
+  safeMarginMm = 0,
 ) {
-  const layout: PrintLayoutMm = {
-    netWidthMm: targetWidthMm,
-    netHeightMm: targetHeightMm,
+  if (bleedMm <= 0) throw new Error("Bleed (mm) trebuie să fie > 0 pentru Bleed AI.");
+
+  const bleedLayout: PrintLayoutMm = {
+    netWidthMm: netW,
+    netHeightMm: netH,
     bleedMm,
-    safeMarginMm: 0,
+    safeMarginMm,
     dpi: targetDpi ?? 72,
   };
-  return prepareAiWorkspaceImage(imageData, layout, reporter?.stage, {
-    applySafeZoneFill: false,
+  const { totalW: cw, totalH: ch, innerW, innerH } = getAiBleedCanvasPixels(bleedLayout);
+  const totalWmm = netW + 2 * bleedMm;
+  const totalHmm = netH + 2 * bleedMm;
+
+  aiLog("openai ai bleed start", { netW, netH, bleedMm, canvas: { cw, ch, innerW, innerH } });
+  const prepared = await prepareImageForAiUpscale(imageData);
+  const netArtworkUrl = await normalizeNetArtworkForBleed(
+    prepared,
+    bleedLayout,
+    (m) => reporter?.stage(m),
+  );
+  const innerNetUrl = await prepareNetArtworkForAiBleedInner(netArtworkUrl, bleedLayout);
+  reporter?.stage(`OpenAI: extind ${innerW}×${innerH}px → ${cw}×${ch}px (+${bleedMm} mm/latură)…`);
+
+  const prompt = buildAiBleedPrompt({
+    formatName,
+    netW,
+    netH,
+    bleedMm,
+    canvasPxW: cw,
+    canvasPxH: ch,
+    safeMarginMm,
   });
+
+  const url = await imageEditFromDataUrlWithQualityLoop(
+    innerNetUrl,
+    prompt,
+    totalWmm,
+    totalHmm,
+    { mode: "bleed", intentSummary: prompt, originalImageUrl: innerNetUrl },
+    reporter,
+    targetDpi,
+  );
+  aiLog("openai ai bleed done", { hasUrl: Boolean(url) });
+  return url;
 }
+
+/** @deprecated Folosește aiGenerativeBleed */
+export const generativeFill = aiGenerativeBleed;
 
 export async function generateCustomMockup(
   userPrompt: string,

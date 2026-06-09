@@ -7,8 +7,14 @@ import {
 } from "../lib/aiKeys";
 import { loadAiAppSettings } from "../lib/aiAppSettings";
 import { aiError, aiLog } from "../lib/aiUpscaleLog";
-import { prepareAiWorkspaceImage, type PrintLayoutMm } from "../lib/printLayoutPostProcess";
-import { buildUpscalePrompt, type ExtendMarginBands } from "../lib/aiUpscalePrompts";
+import {
+  getAiBleedCanvasPixels,
+  normalizeNetArtworkForBleed,
+  prepareAiWorkspaceImage,
+  prepareNetArtworkForAiBleedInner,
+  type PrintLayoutMm,
+} from "../lib/printLayoutPostProcess";
+import { buildAiBleedPrompt, buildUpscalePrompt, type ExtendMarginBands } from "../lib/aiUpscalePrompts";
 import {
   resolveGeminiImageModel,
   resolveGeminiImageModelForUpscale,
@@ -445,40 +451,175 @@ export async function upscaleImage(
   throw new Error("Nu s-a generat nicio imagine. Verifică cotă/cheie API în Setări AI.");
 }
 
-export async function generativeFill(
+async function aiGenerativeBleedGemini(
   imageData: string,
+  netW: number,
+  netH: number,
+  formatName: string,
   bleedMm: number,
-  targetWidthMm: number,
-  targetHeightMm: number,
   reporter?: ProcessingStageReporter,
   targetDpi?: number,
-): Promise<AiReconstructedImageResult> {
-  const layout: PrintLayoutMm = {
-    netWidthMm: targetWidthMm,
-    netHeightMm: targetHeightMm,
+  safeMarginMm = 0,
+): Promise<string | null> {
+  if (bleedMm <= 0) throw new Error("Bleed (mm) trebuie să fie > 0 pentru Bleed AI.");
+
+  const bleedLayout: PrintLayoutMm = {
+    netWidthMm: netW,
+    netHeightMm: netH,
     bleedMm,
-    safeMarginMm: 0,
+    safeMarginMm: safeMarginMm,
     dpi: targetDpi ?? 72,
   };
-  const url = await prepareAiWorkspaceImage(imageData, layout, reporter?.stage, {
-    applySafeZoneFill: false,
+  const { totalW: cw, totalH: ch, innerW, innerH } = getAiBleedCanvasPixels(bleedLayout);
+  const aspectRatio = pickGeminiAspectRatio(cw, ch);
+  const imageSize = resolveGeminiImageSizeForDpi(targetDpi);
+  const model = resolveGeminiImageModelForUpscale("extend");
+
+  aiLog("gemini ai bleed start", { netW, netH, bleedMm, canvas: { cw, ch, innerW, innerH } });
+
+  reporter?.stage("Gemini: pregătesc artă net (fără margini pre-completate)…");
+  const originalDataUrl = await prepareImageForAiUpscale(imageData);
+  const netArtworkUrl = await normalizeNetArtworkForBleed(
+    originalDataUrl,
+    bleedLayout,
+    (m) => reporter?.stage(m),
+  );
+  const innerNetUrl = await prepareNetArtworkForAiBleedInner(netArtworkUrl, bleedLayout);
+  reporter?.stage(`Gemini: extind ${innerW}×${innerH}px → ${cw}×${ch}px (+${bleedMm} mm/latură)…`);
+
+  const prompt = buildAiBleedPrompt({
+    formatName,
+    netW,
+    netH,
+    bleedMm,
+    canvasPxW: cw,
+    canvasPxH: ch,
+    safeMarginMm,
   });
 
+  try {
+    const url = await geminiImageWithQualityLoop({
+      editSourceDataUrl: innerNetUrl,
+      basePrompt: prompt,
+      imageConfig: { aspectRatio, imageSize },
+      critique: { mode: "bleed", intentSummary: prompt, originalImageUrl: innerNetUrl },
+      reporter,
+      targetDpi,
+      providerLabel: `Gemini (${model})`,
+      forcedImageModel: model,
+    });
+    aiLog("gemini ai bleed done", { hasUrl: Boolean(url) });
+    return url;
+  } catch (error) {
+    aiError("gemini ai bleed failed", error);
+    throw error;
+  }
+}
+
+/** Bleed generativ AI: outpaint exact în benzile de bleed setate de utilizator. */
+export async function aiGenerativeBleed(
+  imageData: string,
+  netW: number,
+  netH: number,
+  formatName: string,
+  bleedMm: number,
+  reporter?: ProcessingStageReporter,
+  targetDpi?: number,
+  safeMarginMm = 0,
+): Promise<AiReconstructedImageResult> {
   const app = loadAiAppSettings();
   const gOk = hasGeminiKeyConfigured();
   const oOk = hasOpenAIKeyConfigured();
 
-  if (app.debugCompareImageModels && gOk && oOk) {
-    reporter?.stage("Bleed algoritmic (fără AI) — același rezultat în ambele coloane.");
-    return { kind: "dual", gemini: { imageUrl: url }, openai: { imageUrl: url } };
+  aiLog("aiGenerativeBleed route", {
+    primary: app.primaryImageProvider,
+    debugDual: app.debugCompareImageModels,
+    bleedMm,
+    netW,
+    netH,
+  });
+
+  if (!gOk && !oOk) {
+    throw new Error("Nu există cheie API. Adaugă Gemini sau OpenAI în setări.");
   }
 
-  return {
-    kind: "single",
-    imageUrl: url,
-    provider: preferOpenAI() ? "openai" : "gemini",
-  };
+  if (app.debugCompareImageModels && gOk && oOk) {
+    reporter?.stage("Generez bleed AI în paralel: Gemini + OpenAI…");
+    const geminiReporter = prefixProcessingReporter(reporter, "Gemini");
+    const openaiReporter = prefixProcessingReporter(reporter, "OpenAI");
+    const { gemini, openai } = await runDebugDualImageCompare(
+      aiGenerativeBleedGemini(
+        imageData,
+        netW,
+        netH,
+        formatName,
+        bleedMm,
+        geminiReporter,
+        targetDpi,
+        safeMarginMm,
+      ),
+      openaiPrint.aiGenerativeBleed(
+        imageData,
+        netW,
+        netH,
+        formatName,
+        bleedMm,
+        openaiReporter,
+        targetDpi,
+        safeMarginMm,
+      ),
+    );
+    return { kind: "dual", gemini, openai };
+  }
+
+  const tryOrder: Array<"gemini" | "openai"> =
+    app.primaryImageProvider === "openai" ? ["openai", "gemini"] : ["gemini", "openai"];
+
+  let lastErr: unknown;
+  for (const provider of tryOrder) {
+    if (provider === "gemini" && !gOk) continue;
+    if (provider === "openai" && !oOk) continue;
+    const label = provider === "gemini" ? "Gemini" : "OpenAI";
+    try {
+      const url =
+        provider === "gemini"
+          ? await aiGenerativeBleedGemini(
+              imageData,
+              netW,
+              netH,
+              formatName,
+              bleedMm,
+              reporter,
+              targetDpi,
+              safeMarginMm,
+            )
+          : await openaiPrint.aiGenerativeBleed(
+              imageData,
+              netW,
+              netH,
+              formatName,
+              bleedMm,
+              reporter,
+              targetDpi,
+              safeMarginMm,
+            );
+      if (url) {
+        return { kind: "single", imageUrl: url, provider };
+      }
+      lastErr = new Error(`${label}: răspuns fără imagine`);
+    } catch (e) {
+      lastErr = e;
+      aiError(`${label} ai bleed failed`, e);
+      reporter?.stage(`${label} eșuat — încerc alt furnizor…`);
+    }
+  }
+
+  if (lastErr instanceof Error) throw lastErr;
+  throw new Error("Bleed AI: nu s-a generat nicio imagine.");
 }
+
+/** @deprecated Folosește aiGenerativeBleed */
+export const generativeFill = aiGenerativeBleed;
 
 /** Rafinare pe o singură imagine (ex. din dialogul de comparare). Un apel Gemini. */
 export async function refineGeminiImageFromPrompt(
