@@ -272,7 +272,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     try {
       setPdfRendering(true);
       const targetDpi = resolveTargetDpi(settings.dpi);
-      const { dataUrl, width, height, numPages } = await renderPdfPageToDataUrl(
+      const { dataUrl, width, height, widthMm, heightMm, numPages } = await renderPdfPageToDataUrl(
         buffer,
         pageNum,
         targetDpi,
@@ -281,6 +281,25 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       setPreviewUrl(dataUrl);
       setProcessedUrl(dataUrl);
       setOriginalDimensions({ width, height });
+      setSettings((prev) => ({
+        ...prev,
+        formatId: "custom",
+        customWidth: widthMm,
+        customHeight: heightMm,
+      }));
+
+      const effectiveDpi = Math.min(
+        width / (widthMm / 25.4),
+        height / (heightMm / 25.4),
+      );
+      setIsUpscaleNeeded(false);
+      if (effectiveDpi < targetDpi * 0.9) {
+        setIsUpscaleNeeded(true);
+        toast.info(
+          `Rezoluție scăzută detectată (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`,
+        );
+      }
+
       return numPages;
     } catch (err) {
       console.error("Error rendering PDF page:", err);
@@ -421,7 +440,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
         if (user && isSupabaseConfigured()) {
           try {
-            const { groupId } = await registerUpload(user.uid, uploadedFile, settings.formatId);
+            const { groupId } = await registerUpload(user.uid, uploadedFile, "custom");
             activeHistoryGroupIdRef.current = groupId;
             onHistoryRefresh();
           } catch (err) {

@@ -5,8 +5,15 @@ export type PdfRenderResult = {
   dataUrl: string;
   width: number;
   height: number;
+  widthMm: number;
+  heightMm: number;
   numPages: number;
 };
+
+/** PDF user space: 72 pt = 1 inch. */
+export function pdfPointsToMm(points: number): number {
+  return Math.round(((points * 25.4) / 72) * 10) / 10;
+}
 
 /** Clone buffer — pdf.js transfers ownership and detaches the original. */
 function pdfDataCopy(buffer: ArrayBuffer): Uint8Array {
@@ -55,6 +62,8 @@ export async function renderPdfPageToDataUrl(
     dataUrl: canvas.toDataURL("image/png"),
     width: viewport.width,
     height: viewport.height,
+    widthMm: pdfPointsToMm(baseViewport.width),
+    heightMm: pdfPointsToMm(baseViewport.height),
     numPages: pdf.numPages,
   };
 }
