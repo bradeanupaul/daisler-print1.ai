@@ -196,28 +196,28 @@ function buildAiBleedPremium(ctx: AiBleedPromptContext): string {
 BLEED: ${ctx.bleedMm} mm on each side → total sheet ${totalW}×${totalH} mm.
 OUTPUT FRAME: ${ctx.canvasPxW}×${ctx.canvasPxH} px (full bleed included).
 
-TASK — EXPAND NET ARTWORK WITH PRINT BLEED
+TASK — OUTPAINT PRINT BLEED BANDS ONLY
 
-INPUT: the NET TRIM artwork only (no bleed margins yet).
-OUTPUT: expand the canvas to ${ctx.canvasPxW}×${ctx.canvasPxH} px by adding ${ctx.bleedMm} mm bleed on EACH side.
+INPUT: centered NET TRIM artwork with EMPTY outer bleed bands (white placeholders).
+OUTPUT: same ${ctx.canvasPxW}×${ctx.canvasPxH} px frame — fill ONLY the outer bleed bands.
 
-Naturally continue the illustration at all four edges — textures, colors, lighting, brush strokes, line work, and style must flow outward seamlessly. The original net artwork content must remain intact at the same relative scale in the center (not shrunk into a miniature).
+Match the EXACT texture, brush detail, line weight, color, and lighting of the pixels at each inner edge. The continuation must be indistinguishable from the artwork — as if painted in one pass. No visible seam or style break at the trim line.
 
 ALLOWED:
-- generative outpaint in the new outer margin areas only
-- organic edge continuation matching the existing illustration style
-- print-ready seamless bleed for trimming
+- seamless outpaint in outer bleed bands only
+- pixel-accurate continuation of edge textures outward
+- same illustration style, saturation, and detail level as the border pixels
 
 FORBIDDEN:
-- pixel-stretch, smear, mirror reflection, or 1px extrapolation
-- abstract marbled/swirly filler unrelated to the edge pixels
-- blur, glow, halo, vignette, or soft shadow around the artwork
-- shrinking the design into a miniature with a blurred copy behind it
-- white borders, empty margins, or letterboxing anywhere in the output
-- any change, recrop, or redesign inside the original net artwork
-- new objects, text, logos, or hallucinated details in the center
+- different texture density or style in bleed vs. center (no extra detail, no smoothing)
+- visible rectangular boundary or seam at trim
+- abstract marbled/swirly filler unrelated to edge pixels
+- pixel-stretch, smear, mirror, blur, glow, halo, or vignette
+- shrinking artwork into a miniature; white/empty bleed in output
+- any change inside the centered net artwork
+- new objects, text, or logos in the center
 
-The result must look like the same illustration extended outward — edge pixels continued naturally.
+Bleed must blend invisibly at the trim line — same artist, same brush, continuous surface.
 
 ${safeBlock ? `\n${safeBlock}\n` : ""}
 QUALITY TARGET: Production-ready print file with ${ctx.bleedMm} mm bleed; center identical to input; bleed bands seamless at trim.`;
@@ -229,7 +229,7 @@ export function buildAiBleedPrompt(
   tier: UpscalePromptTier = resolveUpscalePromptTier(),
 ): string {
   if (tier === "short") {
-    return `Expand net ${ctx.netW}×${ctx.netH}mm (${ctx.formatName}) with ${ctx.bleedMm}mm bleed/side. Outpaint edges naturally to ${ctx.canvasPxW}×${ctx.canvasPxH}px. Keep center art unchanged. No smear/marble/white borders.`;
+    return `Outpaint EMPTY bleed bands (${ctx.bleedMm}mm/side) on ${ctx.netW}×${ctx.netH}mm (${ctx.formatName}). Match edge texture exactly; no seam. Center unchanged. Frame ${ctx.canvasPxW}×${ctx.canvasPxH}px.`;
   }
   return buildAiBleedPremium(ctx);
 }

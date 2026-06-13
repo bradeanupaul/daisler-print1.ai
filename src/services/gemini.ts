@@ -8,6 +8,7 @@ import {
 import { loadAiAppSettings } from "../lib/aiAppSettings";
 import { aiError, aiLog } from "../lib/aiUpscaleLog";
 import {
+  composeBleedAiInputCanvas,
   getAiBleedCanvasPixels,
   normalizeNetArtworkForBleed,
   prepareAiWorkspaceImage,
@@ -485,7 +486,16 @@ async function aiGenerativeBleedGemini(
     (m) => reporter?.stage(m),
   );
   const innerNetUrl = await prepareNetArtworkForAiBleedInner(netArtworkUrl, bleedLayout);
-  reporter?.stage(`Gemini: extind ${innerW}×${innerH}px → ${cw}×${ch}px (+${bleedMm} mm/latură)…`);
+  reporter?.stage(`Gemini: outpaint ${cw}×${ch}px (artă net + benzi goale ${bleedMm} mm)…`);
+  const composed = await composeBleedAiInputCanvas(
+    netArtworkUrl,
+    cw,
+    ch,
+    netW,
+    netH,
+    bleedMm,
+    safeMarginMm > 0 ? { safeMarginMm } : undefined,
+  );
 
   const prompt = buildAiBleedPrompt({
     formatName,
@@ -499,7 +509,7 @@ async function aiGenerativeBleedGemini(
 
   try {
     const url = await geminiImageWithQualityLoop({
-      editSourceDataUrl: innerNetUrl,
+      editSourceDataUrl: composed.dataUrl,
       basePrompt: prompt,
       imageConfig: { aspectRatio, imageSize },
       critique: { mode: "bleed", intentSummary: prompt, originalImageUrl: innerNetUrl },

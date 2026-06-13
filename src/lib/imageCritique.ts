@@ -10,11 +10,10 @@ export type ImageCritiqueResult = {
 
 /** Ce trimitem la modelul QA (vision). */
 const BLEED_QA = `
-BLEED EXPAND QA (compare ORIGINAL net art vs OUTPUT with bleed):
-- ORIGINAL is net trim only; OUTPUT must be wider/taller with bleed margins added.
-- Center net artwork: same subjects, colors, style — not shrunk into a miniature.
-- New outer margins: natural continuation of edge pixels — NOT abstract marbled filler, pixel smear, mirror, or stretch.
-- REGENERATE if: marbled/swirly unrelated bleed; pixel smear or mirror; white borders or empty margins; blur halo or miniature center; center moved/rescaled; new subjects/text in center.
+BLEED OUTPAINT QA (compare ORIGINAL net art vs OUTPUT):
+- OUTPUT fills outer bleed bands only; center net artwork unchanged.
+- Bleed texture must match edge pixels — same detail level, no visible seam at trim line.
+- REGENERATE if: texture/style break at trim boundary; extra detail in bleed vs center edges; marbled filler; smear/mirror; white bleed; blur halo; center changed or miniature.
 `;
 
 export type ImageCritiqueRequest = {

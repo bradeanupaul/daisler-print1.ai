@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Coins } from "lucide-react";
 import { cn } from "../lib/utils";
@@ -16,7 +16,8 @@ type AiUsageHistoryBadgeProps = {
 };
 
 const POPUP_W = 300;
-const GAP = 4;
+const GAP = 6;
+const VIEWPORT_MARGIN = 8;
 
 function ProviderSection(props: {
   title: string;
@@ -126,15 +127,34 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
     const el = btnRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    const estH = Math.min(window.innerHeight * 0.7, 360);
-    const spaceBelow = window.innerHeight - r.bottom - GAP;
-    const placeAbove = spaceBelow < estH && r.top > estH;
-    let left = r.right - POPUP_W;
-    if (left < 8) left = 8;
-    if (left + POPUP_W > window.innerWidth - 8) {
-      left = window.innerWidth - POPUP_W - 8;
+    const popupH =
+      popupRef.current?.offsetHeight ?? Math.min(window.innerHeight * 0.7, 360);
+    const maxTop = window.innerHeight - VIEWPORT_MARGIN - popupH;
+    const minTop = VIEWPORT_MARGIN;
+
+    const belowTop = r.bottom + GAP;
+    const aboveTop = r.top - GAP - popupH;
+    let top = belowTop;
+    let placeAbove = false;
+
+    if (belowTop > maxTop) {
+      if (aboveTop >= minTop) {
+        top = aboveTop;
+        placeAbove = true;
+      } else {
+        top = Math.max(minTop, Math.min(belowTop, maxTop));
+      }
     }
-    const top = placeAbove ? r.top - GAP : r.bottom + GAP;
+
+    let left = r.right + GAP;
+    if (left + POPUP_W > window.innerWidth - VIEWPORT_MARGIN) {
+      left = r.left - POPUP_W - GAP;
+    }
+    left = Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(left, window.innerWidth - POPUP_W - VIEWPORT_MARGIN),
+    );
+
     setCoords({ top, left, placeAbove });
   }, []);
 
@@ -167,6 +187,11 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
       return next;
     });
   }, [updatePosition]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open, metadata, updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -202,7 +227,7 @@ export function AiUsageHistoryBadge({ metadata, className }: AiUsageHistoryBadge
           left: coords.left,
           top: coords.top,
           width: POPUP_W,
-          transform: coords.placeAbove ? "translateY(-100%)" : undefined,
+          maxHeight: `min(70vh, ${window.innerHeight - VIEWPORT_MARGIN * 2}px)`,
         }}
         onMouseEnter={show}
         onMouseLeave={scheduleHide}

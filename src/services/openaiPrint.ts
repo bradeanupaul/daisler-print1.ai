@@ -29,6 +29,7 @@ import {
 } from "../lib/printGenerationProfile";
 import { prepareImageForAiUpscale } from "../lib/imageDataUrl";
 import {
+  composeBleedAiInputCanvas,
   getAiBleedCanvasPixels,
   normalizeNetArtworkForBleed,
   prepareNetArtworkForAiBleedInner,
@@ -514,7 +515,16 @@ export async function aiGenerativeBleed(
     (m) => reporter?.stage(m),
   );
   const innerNetUrl = await prepareNetArtworkForAiBleedInner(netArtworkUrl, bleedLayout);
-  reporter?.stage(`OpenAI: extind ${innerW}×${innerH}px → ${cw}×${ch}px (+${bleedMm} mm/latură)…`);
+  reporter?.stage(`OpenAI: outpaint ${cw}×${ch}px (artă net + benzi goale ${bleedMm} mm)…`);
+  const composed = await composeBleedAiInputCanvas(
+    netArtworkUrl,
+    cw,
+    ch,
+    netW,
+    netH,
+    bleedMm,
+    safeMarginMm > 0 ? { safeMarginMm } : undefined,
+  );
 
   const prompt = buildAiBleedPrompt({
     formatName,
@@ -527,7 +537,7 @@ export async function aiGenerativeBleed(
   });
 
   const url = await imageEditFromDataUrlWithQualityLoop(
-    innerNetUrl,
+    composed.dataUrl,
     prompt,
     totalWmm,
     totalHmm,

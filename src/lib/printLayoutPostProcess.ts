@@ -522,9 +522,14 @@ export async function composeBleedAiInputCanvas(
   return { dataUrl: canvas.toDataURL("image/png") };
 }
 
+function smoothstep01(t: number): number {
+  const x = Math.min(1, Math.max(0, t));
+  return x * x * (3 - 2 * x);
+}
+
 /**
- * După Bleed AI: păstrează marginile generate, dar sigilează centrul cu arta net originală
- * (fără halo blurat / miniatură pe care o lasă uneori modelul).
+ * După Bleed AI: margini din output-ul modelului; centru din arta net, cu blend la linia trim
+ * (fără chenar dur între textura AI și original).
  */
 export async function sealNetArtworkOnBleedOutput(
   aiBleedDataUrl: string,
@@ -542,6 +547,8 @@ export async function sealNetArtworkOnBleedOutput(
   const bleedPxY = Math.round(aiCanvas.bleedPxY * scaleY);
   const innerW = Math.max(1, outW - 2 * bleedPxX);
   const innerH = Math.max(1, outH - 2 * bleedPxY);
+  const featherX = Math.max(2, Math.min(Math.round(bleedPxX * 0.4), 20));
+  const featherY = Math.max(2, Math.min(Math.round(bleedPxY * 0.4), 20));
 
   const aiResolved = await ensureImageDataUrl(aiBleedDataUrl);
   const aiNormalized = await normalizeImageCoverToExactPixels(aiResolved, outW, outH);
@@ -555,8 +562,57 @@ export async function sealNetArtworkOnBleedOutput(
   canvas.height = outH;
   const ctx = canvas.getContext("2d");
   if (!ctx) return aiNormalized;
+
   ctx.drawImage(imgAi, 0, 0, outW, outH);
-  ctx.drawImage(imgNet, bleedPxX, bleedPxY, innerW, innerH);
+  const aiData = ctx.getImageData(0, 0, outW, outH);
+
+  const netLayer = document.createElement("canvas");
+  netLayer.width = outW;
+  netLayer.height = outH;
+  const netCtx = netLayer.getContext("2d");
+  if (!netCtx) return aiNormalized;
+  netCtx.drawImage(imgNet, bleedPxX, bleedPxY, innerW, innerH);
+  const netData = netCtx.getImageData(0, 0, outW, outH);
+
+  const out = ctx.createImageData(outW, outH);
+  const innerL = bleedPxX;
+  const innerT = bleedPxY;
+  const innerR = bleedPxX + innerW;
+  const innerB = bleedPxY + innerH;
+
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const i = (y * outW + x) * 4;
+      const inNet =
+        x >= innerL && x < innerR && y >= innerT && y < innerB;
+
+      if (!inNet) {
+        out.data[i] = aiData.data[i]!;
+        out.data[i + 1] = aiData.data[i + 1]!;
+        out.data[i + 2] = aiData.data[i + 2]!;
+        out.data[i + 3] = aiData.data[i + 3]!;
+        continue;
+      }
+
+      const distIn = Math.min(
+        x - innerL,
+        y - innerT,
+        innerR - 1 - x,
+        innerB - 1 - y,
+      );
+      const fx = x < innerL + featherX || x >= innerR - featherX ? featherX : featherX * 2;
+      const fy = y < innerT + featherY || y >= innerB - featherY ? featherY : featherY * 2;
+      const feather = Math.min(fx, fy);
+      const w = distIn >= feather ? 1 : smoothstep01(distIn / feather);
+
+      out.data[i] = Math.round(netData.data[i]! * w + aiData.data[i]! * (1 - w));
+      out.data[i + 1] = Math.round(netData.data[i + 1]! * w + aiData.data[i + 1]! * (1 - w));
+      out.data[i + 2] = Math.round(netData.data[i + 2]! * w + aiData.data[i + 2]! * (1 - w));
+      out.data[i + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(out, 0, 0);
   return canvas.toDataURL("image/png");
 }
 

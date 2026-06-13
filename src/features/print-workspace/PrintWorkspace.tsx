@@ -118,6 +118,7 @@ import {
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
 import { computeImpositionGrid } from '../../lib/impositionLayout';
 import { pickUpscaleNetCanvasPixels } from '../../lib/upscaleCompose';
+import { renderPdfPageToDataUrl } from '../../lib/pdfRasterize';
 
 const resolveTargetDpi = (dpi: ProcessingSettings['dpi']) => dpi ?? DEFAULT_PRINT_SETTINGS.dpi ?? 72;
 
@@ -230,6 +231,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const activeHistoryGroupIdRef = useRef<string | null>(null);
   const lastAiGenerationUsageRef = useRef<AiUsageSummary | null>(null);
   const lastNetArtworkForBleedRef = useRef<string | null>(null);
+  /** Raster la încărcare / schimb pagină — folosit ca să detectăm editări înainte de export PDF. */
+  const baseRasterRef = useRef<string | null>(null);
   // API Key Check (Gemini din .env / storage sau OpenAI)
   useEffect(() => {
     setHasKey(hasAnyAiKeyConfigured());
@@ -269,32 +272,23 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
   const renderPDFPage = useCallback(async (buffer: ArrayBuffer, pageNum: number) => {
     try {
-      const loadingTask = pdfjs.getDocument(buffer);
-      const pdf = await loadingTask.promise;
-      const page = await pdf.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2.0 }); // Higher scale for better preview
-      const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d');
-      canvas.height = viewport.height;
-      canvas.width = viewport.width;
-      
-      await page.render({ 
-        canvasContext: context!, 
-        viewport,
-        intent: 'display'
-      } as any).promise;
-      
-      const dataUrl = canvas.toDataURL('image/png');
+      const targetDpi = resolveTargetDpi(settings.dpi);
+      const { dataUrl, width, height, numPages } = await renderPdfPageToDataUrl(
+        buffer,
+        pageNum,
+        targetDpi,
+      );
+      baseRasterRef.current = dataUrl;
       setPreviewUrl(dataUrl);
       setProcessedUrl(dataUrl);
-
-      return pdf.numPages;
+      setOriginalDimensions({ width, height });
+      return numPages;
     } catch (err) {
       console.error("Error rendering PDF page:", err);
       toast.error("Failed to render PDF page");
       return 0;
     }
-  }, []);
+  }, [settings.dpi]);
 
   useEffect(() => {
     if (file?.type === 'application/pdf' && originalBuffer) {
@@ -357,6 +351,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
           setPreviewUrl(url);
           setProcessedUrl(url);
+          baseRasterRef.current = url;
           
           const img = new Image();
           img.onload = async () => {
@@ -449,6 +444,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       revokeObjectUrl(prev);
       return null;
     });
+    baseRasterRef.current = null;
     setOriginalDimensions(null);
     setTotalPages(0);
     setCurrentPage(1);
@@ -661,7 +657,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const netSource = netArtworkUrl ?? lastNetArtworkForBleedRef.current;
       let normalized: string;
       if (netSource) {
-        processing.stage("Sigilez centrul cu arta originală…");
+        processing.stage("Combin marginile AI cu arta originală (blend la trim)…");
         normalized = await sealNetArtworkOnBleedOutput(
           dataUrl,
           netSource,
@@ -706,6 +702,49 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     noClick: !!file,
   });
 
+  const canvasHasEdits =
+    !!processedUrl && !!baseRasterRef.current && processedUrl !== baseRasterRef.current;
+
+  const resolvePrintExportBuffer = useCallback(async (): Promise<ArrayBuffer> => {
+    if (!originalBuffer || !file) throw new Error("No file loaded");
+    let bufferToUse = originalBuffer;
+
+    if (file.type.includes('svg') || file.name.toLowerCase().endsWith('.svg')) {
+      const svgText = new TextDecoder().decode(originalBuffer);
+      const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+      try {
+        const pngUrl = await rasterizeToPNG(svgUrl);
+        const response = await fetch(pngUrl);
+        bufferToUse = await response.arrayBuffer();
+      } catch (err) {
+        console.error("Rasterization failed during export:", err);
+      } finally {
+        URL.revokeObjectURL(svgUrl);
+      }
+    }
+
+    const isImageLike =
+      file.type.includes('image') || file.name.toLowerCase().endsWith('.svg');
+    const isPdf = file.type === 'application/pdf';
+    const useProcessedRaster =
+      processedUrl && (isImageLike || (isPdf && canvasHasEdits));
+
+    if (useProcessedRaster) {
+      const layout = getPrintLayoutFromSettings(settings);
+      const printReadyUrl = await upscaleDataUrlToPrintPixels(
+        processedUrl,
+        layout,
+        "total",
+        (m) => processing.stage(m),
+      );
+      const response = await fetch(printReadyUrl);
+      bufferToUse = await response.arrayBuffer();
+    }
+
+    return bufferToUse;
+  }, [originalBuffer, file, processedUrl, canvasHasEdits, settings, rasterizeToPNG, processing]);
+
   const handleDownload = async () => {
     if (!originalBuffer || !file) return;
     processing.begin("Generez PDF tipăribil…");
@@ -714,40 +753,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const width = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
       const height = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
 
-      // Use processedUrl (AI results) if available and if it's an image
-      let bufferToUse = originalBuffer;
-      
-      // Handle SVG files specifically: pdf-lib doesn't support them directly,
-      // so we must rasterize them to a high-res PNG first for embedding.
+      // Use processedUrl (AI results) when the canvas was edited
       processing.stage("Pregătesc conținutul fișierului…");
-      if (file.type.includes('svg') || file.name.toLowerCase().endsWith('.svg')) {
-        const svgText = new TextDecoder().decode(originalBuffer);
-        const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
-        const svgUrl = URL.createObjectURL(svgBlob);
-        
-        try {
-          const pngUrl = await rasterizeToPNG(svgUrl);
-          const response = await fetch(pngUrl);
-          bufferToUse = await response.arrayBuffer();
-        } catch (err) {
-          console.error("Rasterization failed during download:", err);
-          // Fallback to original buffer (might still fail in pdf generation if it's not SVG-ready)
-        } finally {
-          URL.revokeObjectURL(svgUrl);
-        }
-      }
-
-      if (processedUrl && (file.type.includes('image') || file.name.toLowerCase().endsWith('.svg'))) {
-        const layout = getPrintLayoutFromSettings(settings);
-        const printReadyUrl = await upscaleDataUrlToPrintPixels(
-          processedUrl,
-          layout,
-          "total",
-          (m) => processing.stage(m),
-        );
-        const response = await fetch(printReadyUrl);
-        bufferToUse = await response.arrayBuffer();
-      }
+      const bufferToUse = await resolvePrintExportBuffer();
 
       processing.stage("Generez PDF pentru tipar…");
       const pdfBytes = await generatePrintPDF(
@@ -761,7 +769,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         false,
         settings.cutLineColor,
         false,
-        file.type === 'application/pdf' && settings.pdfPageRange === 'current' ? currentPage - 1 : 'all'
+        file.type === 'application/pdf' && !canvasHasEdits && settings.pdfPageRange === 'current'
+          ? currentPage - 1
+          : 'all'
       );
 
       const blob = new Blob([pdfBytes], { type: 'application/pdf' });
@@ -918,8 +928,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       }
 
       processing.stage("Generez PDF de imposiție…");
+      const impositionBuffer = await resolvePrintExportBuffer();
       const pdfBytes = await generateImpositionPDF(
-        originalBuffer,
+        impositionBuffer,
         plan.itemWidthMm,
         plan.itemHeightMm,
         plan.sheetWidthMm,
@@ -930,7 +941,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         settings.bleed || 0,
         resolveTargetDpi(settings.dpi),
         false,
-        currentPage - 1
+        file.type === 'application/pdf' && !canvasHasEdits ? currentPage - 1 : 0
       );
 
       if (!pdfBytes) throw new Error("PDF generation failed");
@@ -1094,6 +1105,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           }
           setPreviewUrl(imageUrl);
           setProcessedUrl(imageUrl);
+          baseRasterRef.current = imageUrl;
 
           const effectiveFormatId = formatId ?? settings.formatId;
           const img = new Image();
