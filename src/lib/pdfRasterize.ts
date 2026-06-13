@@ -1,4 +1,5 @@
 import * as pdfjs from "pdfjs-dist";
+import { ensurePdfWorker } from "./pdfWorker";
 
 export type PdfRenderResult = {
   dataUrl: string;
@@ -7,13 +8,23 @@ export type PdfRenderResult = {
   numPages: number;
 };
 
+/** Clone buffer — pdf.js transfers ownership and detaches the original. */
+function pdfDataCopy(buffer: ArrayBuffer): Uint8Array {
+  return new Uint8Array(buffer.slice(0));
+}
+
 /** Scale pdf.js viewport so the long edge maps to ~targetDpi (PDF user space = 72 dpi). */
 export function pdfRenderScaleForDpi(targetDpi: number, pageWidthPt: number, pageHeightPt: number): number {
   const base = Math.max(targetDpi / 72, 1);
-  const longEdgePt = Math.max(pageWidthPt, pageHeightPt);
   const minScaleForPreview = 2;
   const maxScale = 4;
   return Math.min(maxScale, Math.max(minScaleForPreview, base));
+}
+
+export async function getPdfPageCount(buffer: ArrayBuffer): Promise<number> {
+  ensurePdfWorker();
+  const pdf = await pdfjs.getDocument({ data: pdfDataCopy(buffer) }).promise;
+  return pdf.numPages;
 }
 
 export async function renderPdfPageToDataUrl(
@@ -21,8 +32,8 @@ export async function renderPdfPageToDataUrl(
   pageNum: number,
   targetDpi = 150,
 ): Promise<PdfRenderResult> {
-  const loadingTask = pdfjs.getDocument(buffer);
-  const pdf = await loadingTask.promise;
+  ensurePdfWorker();
+  const pdf = await pdfjs.getDocument({ data: pdfDataCopy(buffer) }).promise;
   const page = await pdf.getPage(pageNum);
   const baseViewport = page.getViewport({ scale: 1 });
   const scale = pdfRenderScaleForDpi(targetDpi, baseViewport.width, baseViewport.height);
@@ -34,10 +45,11 @@ export async function renderPdfPageToDataUrl(
   canvas.width = viewport.width;
 
   await page.render({
+    canvas,
     canvasContext: context,
     viewport,
     intent: "display",
-  } as Parameters<typeof page.render>[0]).promise;
+  }).promise;
 
   return {
     dataUrl: canvas.toDataURL("image/png"),

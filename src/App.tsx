@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import * as pdfjs from "pdfjs-dist";
+import { ensurePdfWorker } from "./lib/pdfWorker";
 import {
   auth,
   db,
@@ -33,9 +33,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (pdfjs.version) {
-      pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
-    }
+    ensurePdfWorker();
   }, []);
 
   const [user, setUser] = useState<FirebaseUser | null>(null);

@@ -43,7 +43,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { useDropzone } from 'react-dropzone';
 import { toast } from 'sonner';
-import * as pdfjs from 'pdfjs-dist';
+import { renderPdfPageToDataUrl } from '../../lib/pdfRasterize';
+import { ensurePdfWorker, isPdfFile } from '../../lib/pdfWorker';
 import ImageTracer from 'imagetracerjs';
 import { 
   auth, 
@@ -118,7 +119,6 @@ import {
 import { DEFAULT_PRINT_SETTINGS } from './defaultPrintSettings';
 import { computeImpositionGrid } from '../../lib/impositionLayout';
 import { pickUpscaleNetCanvasPixels } from '../../lib/upscaleCompose';
-import { renderPdfPageToDataUrl } from '../../lib/pdfRasterize';
 
 const resolveTargetDpi = (dpi: ProcessingSettings['dpi']) => dpi ?? DEFAULT_PRINT_SETTINGS.dpi ?? 72;
 
@@ -141,11 +141,8 @@ export type PrintWorkspaceProps = {
 };
 
 export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh }: PrintWorkspaceProps) {
-  // Set up PDF.js worker
   useEffect(() => {
-    if (pdfjs.version) {
-      pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
-    }
+    ensurePdfWorker();
   }, []);
   const [file, setFile] = useState<File | null>(null);
   const [originalBuffer, setOriginalBuffer] = useState<ArrayBuffer | null>(null);
@@ -188,6 +185,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [historyLoadingAssetId, setHistoryLoadingAssetId] = useState<string | null>(null);
   const [historySelectedAssetId, setHistorySelectedAssetId] = useState<string | null>(null);
+  const [pdfRendering, setPdfRendering] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [mockupMenuOpen, setMockupMenuOpen] = useState(false);
@@ -272,6 +270,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
   const renderPDFPage = useCallback(async (buffer: ArrayBuffer, pageNum: number) => {
     try {
+      setPdfRendering(true);
       const targetDpi = resolveTargetDpi(settings.dpi);
       const { dataUrl, width, height, numPages } = await renderPdfPageToDataUrl(
         buffer,
@@ -285,16 +284,28 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       return numPages;
     } catch (err) {
       console.error("Error rendering PDF page:", err);
-      toast.error("Failed to render PDF page");
+      toast.error(
+        err instanceof Error
+          ? `Nu s-a putut afișa PDF-ul: ${err.message}`
+          : "Nu s-a putut afișa PDF-ul.",
+      );
       return 0;
+    } finally {
+      setPdfRendering(false);
     }
   }, [settings.dpi]);
 
   useEffect(() => {
-    if (file?.type === 'application/pdf' && originalBuffer) {
-      renderPDFPage(originalBuffer, currentPage);
-    }
-  }, [currentPage, originalBuffer, file?.type, renderPDFPage]);
+    if (!originalBuffer || !file || !isPdfFile(file)) return;
+    let cancelled = false;
+    void (async () => {
+      const pages = await renderPDFPage(originalBuffer, currentPage);
+      if (!cancelled && pages > 0) setTotalPages(pages);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPage, originalBuffer, file, renderPDFPage]);
 
   // Helper to rasterize SVG/Image to high-res PNG
   const rasterizeToPNG = useCallback((dataUrl: string): Promise<string> => {
@@ -405,9 +416,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           img.src = url;
         };
         reader.readAsDataURL(uploadedFile);
-      } else if (uploadedFile.type === 'application/pdf') {
-        const pages = await renderPDFPage(buffer, 1);
-        setTotalPages(pages);
+      } else if (isPdfFile(uploadedFile)) {
+        setTotalPages(0);
 
         if (user && isSupabaseConfigured()) {
           try {
@@ -451,6 +461,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     setAnalysis(null);
     setTracedSvg(null);
     setIsUpscaleNeeded(false);
+    setPdfRendering(false);
     processing.stop();
     setIsAnalyzing(false);
     activeHistoryGroupIdRef.current = null;
@@ -726,7 +737,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
     const isImageLike =
       file.type.includes('image') || file.name.toLowerCase().endsWith('.svg');
-    const isPdf = file.type === 'application/pdf';
+    const isPdf = isPdfFile(file);
     const useProcessedRaster =
       processedUrl && (isImageLike || (isPdf && canvasHasEdits));
 
@@ -769,7 +780,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         false,
         settings.cutLineColor,
         false,
-        file.type === 'application/pdf' && !canvasHasEdits && settings.pdfPageRange === 'current'
+        isPdfFile(file) && !canvasHasEdits && settings.pdfPageRange === 'current'
           ? currentPage - 1
           : 'all'
       );
@@ -941,7 +952,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         settings.bleed || 0,
         resolveTargetDpi(settings.dpi),
         false,
-        file.type === 'application/pdf' && !canvasHasEdits ? currentPage - 1 : 0
+        isPdfFile(file) && !canvasHasEdits ? currentPage - 1 : 0
       );
 
       if (!pdfBytes) throw new Error("PDF generation failed");
@@ -1085,8 +1096,6 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
 
         if (isPdf) {
           processing.stage("Randez pagina PDF…");
-          const pages = await renderPDFPage(buffer, 1);
-          setTotalPages(pages);
         } else {
           processing.stage("Pregătesc previzualizarea…");
           setTotalPages(0);
@@ -2045,7 +2054,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                         Opțiuni PDF tipăribil
                       </p>
                       <div className="space-y-2">
-                        {file?.type === "application/pdf" && (
+                        {file && isPdfFile(file) && (
                           <div className="space-y-2 rounded-lg border border-white/10 bg-white/5 p-2.5">
                             <div className="flex items-center gap-2">
                               <FileText className="h-4 w-4 text-amber-500" />
@@ -2542,6 +2551,11 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                           />
                     </div>
                       </div>
+                    </div>
+                  ) : file && (pdfRendering || (isPdfFile(file) && !canvasDisplayUrl)) ? (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+                      <Loader2 className="h-10 w-10 animate-spin text-amber-500/80" />
+                      <p className="text-sm text-[var(--text-muted)]">Randez PDF-ul…</p>
                     </div>
                   ) : (
                     <div className="text-center space-y-4 opacity-30">
