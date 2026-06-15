@@ -25,7 +25,6 @@ import {
   Box,
   Key,
   Crop as CropIcon,
-  ArrowUpCircle,
   Layers,
   Zap,
   Check,
@@ -43,8 +42,15 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { useDropzone } from 'react-dropzone';
 import { toast } from 'sonner';
-import { renderPdfPageToDataUrl } from '../../lib/pdfRasterize';
 import { ensurePdfWorker, isPdfFile } from '../../lib/pdfWorker';
+import { renderPdfPageToDataUrl, getPdfPageCount } from '../../lib/pdfRasterize';
+import {
+  clearPdfPageMaps,
+  createPdfPageMaps,
+  pdfHasAnyEdits,
+  pdfPageDisplayUrl,
+  type PdfPageMeta,
+} from '../../lib/pdfPageWorkspace';
 import ImageTracer from 'imagetracerjs';
 import { 
   auth, 
@@ -79,7 +85,8 @@ import { isSupabaseConfigured } from '../../lib/supabase/client';
 import { FileHistoryDrawer } from '../../components/FileHistoryDrawer';
 import { 
   generateImpositionPDF,
-  generatePrintPDF 
+  generatePrintPDF,
+  generatePrintPdfWithPageRasters,
 } from '../../services/pdf';
 import { 
   processAgentMessage, 
@@ -231,6 +238,13 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
   const lastNetArtworkForBleedRef = useRef<string | null>(null);
   /** Raster la încărcare / schimb pagină — folosit ca să detectăm editări înainte de export PDF. */
   const baseRasterRef = useRef<string | null>(null);
+  const pdfPagesRef = useRef(createPdfPageMaps());
+  const pdfBatchUpscaleRef = useRef<{
+    mode: UpscaleMode;
+    nextPage: number;
+    provider: "gemini" | "openai";
+  } | null>(null);
+  const [pdfEditsRevision, setPdfEditsRevision] = useState(0);
   // API Key Check (Gemini din .env / storage sau OpenAI)
   useEffect(() => {
     setHasKey(hasAnyAiKeyConfigured());
@@ -268,51 +282,116 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     toast.success("Cheie API salvată. Repornește dev serverul dacă folosești doar .env.local.");
   };
 
-  const renderPDFPage = useCallback(async (buffer: ArrayBuffer, pageNum: number) => {
-    try {
-      setPdfRendering(true);
+  const bumpPdfEdits = useCallback(() => setPdfEditsRevision((n) => n + 1), []);
+
+  const isMultiPagePdf = useCallback(
+    () => !!(file && isPdfFile(file) && totalPages > 1 && originalBuffer),
+    [file, totalPages, originalBuffer],
+  );
+
+  const applyPdfPageMetaToSettings = useCallback((meta: PdfPageMeta) => {
+    setSettings((prev) => ({
+      ...prev,
+      formatId: "custom",
+      customWidth: meta.widthMm,
+      customHeight: meta.heightMm,
+    }));
+    setOriginalDimensions({ width: meta.widthPx, height: meta.heightPx });
+  }, []);
+
+  const syncPdfPageToCanvas = useCallback(
+    (pageNum: number) => {
+      const maps = pdfPagesRef.current;
+      const base = maps.baseRasters.get(pageNum);
+      const display = pdfPageDisplayUrl(maps, pageNum);
+      if (!display) return;
+      baseRasterRef.current = base ?? display;
+      setPreviewUrl(display);
+      setProcessedUrl(display);
+      setCanvasRevision((n) => n + 1);
+      const meta = maps.meta.get(pageNum);
+      if (meta) applyPdfPageMetaToSettings(meta);
+    },
+    [applyPdfPageMetaToSettings],
+  );
+
+  const storePdfPageEdit = useCallback(
+    (pageNum: number, dataUrl: string) => {
+      pdfPagesRef.current.edits.set(pageNum, dataUrl);
+      bumpPdfEdits();
+    },
+    [bumpPdfEdits],
+  );
+
+  const ensurePdfPageRaster = useCallback(
+    async (pageNum: number): Promise<string> => {
+      const maps = pdfPagesRef.current;
+      const cached = maps.baseRasters.get(pageNum);
+      if (cached) return cached;
+      if (!originalBuffer) throw new Error("PDF indisponibil");
       const targetDpi = resolveTargetDpi(settings.dpi);
-      const { dataUrl, width, height, widthMm, heightMm, numPages } = await renderPdfPageToDataUrl(
-        buffer,
-        pageNum,
-        targetDpi,
-      );
-      baseRasterRef.current = dataUrl;
-      setPreviewUrl(dataUrl);
-      setProcessedUrl(dataUrl);
-      setOriginalDimensions({ width, height });
-      setSettings((prev) => ({
-        ...prev,
-        formatId: "custom",
-        customWidth: widthMm,
-        customHeight: heightMm,
-      }));
+      const rendered = await renderPdfPageToDataUrl(originalBuffer, pageNum, targetDpi);
+      maps.baseRasters.set(pageNum, rendered.dataUrl);
+      maps.meta.set(pageNum, {
+        widthMm: rendered.widthMm,
+        heightMm: rendered.heightMm,
+        widthPx: rendered.width,
+        heightPx: rendered.height,
+      });
+      return rendered.dataUrl;
+    },
+    [originalBuffer, settings.dpi],
+  );
 
-      const effectiveDpi = Math.min(
-        width / (widthMm / 25.4),
-        height / (heightMm / 25.4),
-      );
-      setIsUpscaleNeeded(false);
-      if (effectiveDpi < targetDpi * 0.9) {
-        setIsUpscaleNeeded(true);
-        toast.info(
-          `Rezoluție scăzută detectată (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`,
+  const renderPDFPage = useCallback(
+    async (buffer: ArrayBuffer, pageNum: number) => {
+      try {
+        setPdfRendering(true);
+        const maps = pdfPagesRef.current;
+        const cachedBase = maps.baseRasters.get(pageNum);
+        const cachedMeta = maps.meta.get(pageNum);
+
+        if (cachedBase && cachedMeta) {
+          syncPdfPageToCanvas(pageNum);
+          return totalPages || (await getPdfPageCount(buffer));
+        }
+
+        const targetDpi = resolveTargetDpi(settings.dpi);
+        const { dataUrl, width, height, widthMm, heightMm, numPages } =
+          await renderPdfPageToDataUrl(buffer, pageNum, targetDpi);
+        maps.baseRasters.set(pageNum, dataUrl);
+        maps.meta.set(pageNum, {
+          widthMm,
+          heightMm,
+          widthPx: width,
+          heightPx: height,
+        });
+        syncPdfPageToCanvas(pageNum);
+
+        const effectiveDpi = Math.min(width / (widthMm / 25.4), height / (heightMm / 25.4));
+        setIsUpscaleNeeded(false);
+        if (effectiveDpi < targetDpi * 0.9) {
+          setIsUpscaleNeeded(true);
+          toast.info(
+            `Rezoluție scăzută detectată (${Math.round(effectiveDpi)} DPI). AI Upscale recomandat.`,
+          );
+        }
+
+        return numPages;
+      } catch (err) {
+        console.error("Error rendering PDF page:", err);
+        toast.error(
+          err instanceof Error
+            ? `Nu s-a putut afișa PDF-ul: ${err.message}`
+            : "Nu s-a putut afișa PDF-ul.",
         );
+        return 0;
+      } finally {
+        setPdfRendering(false);
       }
-
-      return numPages;
-    } catch (err) {
-      console.error("Error rendering PDF page:", err);
-      toast.error(
-        err instanceof Error
-          ? `Nu s-a putut afișa PDF-ul: ${err.message}`
-          : "Nu s-a putut afișa PDF-ul.",
-      );
-      return 0;
-    } finally {
-      setPdfRendering(false);
-    }
-  }, [settings.dpi]);
+    },
+    [settings.dpi, syncPdfPageToCanvas, totalPages],
+  );
 
   useEffect(() => {
     if (!originalBuffer || !file || !isPdfFile(file)) return;
@@ -437,6 +516,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         reader.readAsDataURL(uploadedFile);
       } else if (isPdfFile(uploadedFile)) {
         setTotalPages(0);
+        clearPdfPageMaps(pdfPagesRef.current);
+        bumpPdfEdits();
+        pdfBatchUpscaleRef.current = null;
 
         if (user && isSupabaseConfigured()) {
           try {
@@ -474,6 +556,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       return null;
     });
     baseRasterRef.current = null;
+    clearPdfPageMaps(pdfPagesRef.current);
+    pdfBatchUpscaleRef.current = null;
+    bumpPdfEdits();
     setOriginalDimensions(null);
     setTotalPages(0);
     setCurrentPage(1);
@@ -599,7 +684,37 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     [settings, processing],
   );
 
-  const finalizeAiUpscaleOutput = useCallback(
+  const applyToAllPdfPages = useCallback(
+    async (
+      label: string,
+      processPage: (sourceUrl: string, pageNum: number) => Promise<string | null>,
+    ): Promise<void> => {
+      if (!originalBuffer || !file || !isPdfFile(file)) return;
+      const pageCount = totalPages > 0 ? totalPages : await getPdfPageCount(originalBuffer);
+      if (pageCount <= 1) return;
+
+      for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+        processing.stage(`${label} — pagina ${pageNum}/${pageCount}`);
+        const sourceUrl = await ensurePdfPageRaster(pageNum);
+        const result = await processPage(sourceUrl, pageNum);
+        if (!result) throw new Error(`Pagina ${pageNum}: procesare eșuată`);
+        storePdfPageEdit(pageNum, result);
+      }
+      syncPdfPageToCanvas(currentPage);
+    },
+    [
+      originalBuffer,
+      file,
+      totalPages,
+      ensurePdfPageRaster,
+      storePdfPageEdit,
+      syncPdfPageToCanvas,
+      currentPage,
+      processing,
+    ],
+  );
+
+  const finalizeAiUpscaleUrl = useCallback(
     async (
       url: string | null,
       meta?: { mode?: UpscaleMode; provider?: string; historyLabel?: string },
@@ -623,37 +738,150 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         dataUrl = url;
       }
 
-      aiLog("AI result received", { len: dataUrl.length });
-
       processing.stage("Normalizez la rezoluția AI + bleed…");
       const finalized = await applyAlgorithmicBleed(dataUrl, {
         layoutSettings,
         normalizeToAiTarget: true,
       });
-      const displayUrl = finalized ?? dataUrl;
-      setProcessedUrl(displayUrl);
-      setPreviewUrl(displayUrl);
-      setCanvasRevision((n) => n + 1);
+      return finalized ?? dataUrl;
+    },
+    [applyAlgorithmicBleed, processing, settings],
+  );
+
+  const finalizeAiUpscaleOutput = useCallback(
+    async (
+      url: string | null,
+      meta?: { mode?: UpscaleMode; provider?: string; historyLabel?: string },
+      opts?: { pageNum?: number; skipBatch?: boolean },
+    ): Promise<string | null> => {
+      const displayUrl = await finalizeAiUpscaleUrl(url, meta);
+      if (!displayUrl) return null;
+
+      aiLog("AI result received", { len: displayUrl.length });
+      const pageNum = opts?.pageNum ?? currentPage;
+
+      if (file && isPdfFile(file)) {
+        storePdfPageEdit(pageNum, displayUrl);
+        syncPdfPageToCanvas(pageNum);
+      } else {
+        setProcessedUrl(displayUrl);
+        setPreviewUrl(displayUrl);
+        setCanvasRevision((n) => n + 1);
+      }
+
       aiLog("finalize workspace image", { len: displayUrl.length });
       setIsUpscaleNeeded(false);
+
       if (meta?.historyLabel) {
-        void persistProcessedToHistory(dataUrl, "upscale", `${meta.historyLabel}_ai_raw`, {
+        void persistProcessedToHistory(url!, "upscale", `${meta.historyLabel}_ai_raw`, {
           mode: meta.mode,
           provider: meta.provider,
           stage: "ai_output",
+          pdfPage: file && isPdfFile(file) ? pageNum : undefined,
         }, { clearUsageAfter: false });
-        if (finalized) {
-          void persistProcessedToHistory(finalized, "upscale", meta.historyLabel, {
-            mode: meta.mode,
-            provider: meta.provider,
-            postProcess: "algorithmic_bleed",
-            stage: "after_bleed",
-          });
-        }
+        void persistProcessedToHistory(displayUrl, "upscale", meta.historyLabel, {
+          mode: meta.mode,
+          provider: meta.provider,
+          postProcess: "algorithmic_bleed",
+          stage: "after_bleed",
+          pdfPage: file && isPdfFile(file) ? pageNum : undefined,
+        });
       }
-      return finalized ?? dataUrl;
+
+      if (!opts?.skipBatch && isMultiPagePdf()) {
+        const mode = meta?.mode ?? settings.upscaleMode ?? "extend";
+        await applyToAllPdfPages(
+          mode === "extend" ? "AI Upscale (extend)" : "AI Upscale (recompose)",
+          async (sourceUrl, p) => {
+            if (p === pageNum) return displayUrl;
+            const pageMeta = pdfPagesRef.current.meta.get(p);
+            const netW = pageMeta?.widthMm ?? settings.customWidth ?? 90;
+            const netH = pageMeta?.heightMm ?? settings.customHeight ?? 50;
+            const formatName = "Custom";
+            const targetDpi = resolveTargetDpi(settings.dpi);
+            const safeMargin = settings.addSafeZone ? (settings.safeMargin ?? 3) : 0;
+            const bleedMm = settings.bleed ?? 3;
+            const result = await upscaleImage(
+              sourceUrl,
+              netW,
+              netH,
+              formatName,
+              mode,
+              processing.getReporter(),
+              targetDpi,
+              safeMargin,
+              bleedMm,
+            );
+            if (result.kind === "dual") {
+              const picked = result.gemini.imageUrl ?? result.openai.imageUrl;
+              if (!picked) return null;
+              return finalizeAiUpscaleUrl(picked, {
+                mode,
+                provider: result.gemini.imageUrl ? "gemini" : "openai",
+              });
+            }
+            if (!result.imageUrl) return null;
+            return finalizeAiUpscaleUrl(result.imageUrl, {
+              mode,
+              provider: result.provider,
+            });
+          },
+        );
+        syncPdfPageToCanvas(currentPage);
+        toast.success(`Upscale aplicat pe toate cele ${totalPages} pagini.`);
+      }
+
+      return displayUrl;
     },
-    [applyAlgorithmicBleed, processing, persistProcessedToHistory, settings],
+    [
+      finalizeAiUpscaleUrl,
+      file,
+      currentPage,
+      storePdfPageEdit,
+      syncPdfPageToCanvas,
+      persistProcessedToHistory,
+      isMultiPagePdf,
+      applyToAllPdfPages,
+      settings,
+      processing,
+      totalPages,
+    ],
+  );
+
+  const finalizeAiBleedUrl = useCallback(
+    async (
+      url: string,
+      netArtworkUrl?: string | null,
+      layoutSettings?: ProcessingSettings,
+    ): Promise<string> => {
+      const activeSettings = layoutSettings ?? {
+        ...settings,
+        showBleedGuide: true,
+        showSafeGuide: true,
+        addSafeZone: true,
+        bleed: settings.bleed ?? 3,
+        safeMargin: settings.safeMargin ?? 3,
+      };
+      const layout = getPrintLayoutFromSettings(activeSettings);
+      const { totalW: targetW, totalH: targetH } = getAiBleedCanvasPixels(layout);
+
+      let dataUrl: string;
+      try {
+        dataUrl = await ensureImageDataUrl(url);
+      } catch (e) {
+        console.warn("ensureImageDataUrl:", e);
+        dataUrl = url;
+      }
+
+      if (netArtworkUrl) {
+        processing.stage("Combin marginile AI cu arta originală (blend la trim)…");
+        return sealNetArtworkOnBleedOutput(dataUrl, netArtworkUrl, layout, targetW, targetH);
+      }
+
+      processing.stage(`Normalizez la ${targetW}×${targetH}px (bleed AI inclus)…`);
+      return normalizeImageDataUrlToExactPixels(dataUrl, targetW, targetH);
+    },
+    [processing, settings],
   );
 
   const finalizeAiBleedOutput = useCallback(
@@ -661,6 +889,7 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       url: string | null,
       meta?: { provider?: string; historyLabel?: string },
       netArtworkUrl?: string | null,
+      opts?: { pageNum?: number; skipBatch?: boolean },
     ): Promise<string | null> => {
       if (!url) return null;
       const layoutSettings: ProcessingSettings = {
@@ -673,53 +902,95 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       };
       setSettings(layoutSettings);
 
-      const layout = getPrintLayoutFromSettings(layoutSettings);
-      const { totalW: targetW, totalH: targetH } = getAiBleedCanvasPixels(layout);
-
-      let dataUrl: string;
-      try {
-        dataUrl = await ensureImageDataUrl(url);
-      } catch (e) {
-        console.warn("ensureImageDataUrl:", e);
-        dataUrl = url;
-      }
-
-      const netSource = netArtworkUrl ?? lastNetArtworkForBleedRef.current;
-      let normalized: string;
-      if (netSource) {
-        processing.stage("Combin marginile AI cu arta originală (blend la trim)…");
-        normalized = await sealNetArtworkOnBleedOutput(
-          dataUrl,
-          netSource,
-          layout,
-          targetW,
-          targetH,
-        );
-      } else {
-        processing.stage(`Normalizez la ${targetW}×${targetH}px (bleed AI inclus)…`);
-        normalized = await normalizeImageDataUrlToExactPixels(dataUrl, targetW, targetH);
-      }
+      const normalized = await finalizeAiBleedUrl(url, netArtworkUrl, layoutSettings);
       lastNetArtworkForBleedRef.current = null;
-      setProcessedUrl(normalized);
-      setPreviewUrl(normalized);
-      setCanvasRevision((n) => n + 1);
+      const pageNum = opts?.pageNum ?? currentPage;
+
+      if (file && isPdfFile(file)) {
+        storePdfPageEdit(pageNum, normalized);
+        syncPdfPageToCanvas(pageNum);
+      } else {
+        setProcessedUrl(normalized);
+        setPreviewUrl(normalized);
+        setCanvasRevision((n) => n + 1);
+      }
       setIsUpscaleNeeded(false);
 
       if (meta?.historyLabel) {
-        void persistProcessedToHistory(dataUrl, "generative_fill", `${meta.historyLabel}_ai_raw`, {
+        void persistProcessedToHistory(url, "generative_fill", `${meta.historyLabel}_ai_raw`, {
           provider: meta.provider,
           stage: "ai_output",
           postProcess: "ai_bleed",
+          pdfPage: file && isPdfFile(file) ? pageNum : undefined,
         }, { clearUsageAfter: false });
         void persistProcessedToHistory(normalized, "generative_fill", meta.historyLabel, {
           provider: meta.provider,
           postProcess: "ai_bleed",
           stage: "after_normalize",
+          pdfPage: file && isPdfFile(file) ? pageNum : undefined,
         });
       }
+
+      if (!opts?.skipBatch && isMultiPagePdf()) {
+        const bleedMm = settings.bleed ?? 3;
+        const targetDpi = resolveTargetDpi(settings.dpi);
+        const safeMargin = settings.addSafeZone ? (settings.safeMargin ?? 3) : 0;
+        await applyToAllPdfPages("Bleed AI", async (sourceUrl, p) => {
+          if (p === pageNum) return normalized;
+          const pageMeta = pdfPagesRef.current.meta.get(p);
+          const netW = pageMeta?.widthMm ?? settings.customWidth ?? 90;
+          const netH = pageMeta?.heightMm ?? settings.customHeight ?? 50;
+          const bleedLayout = getPrintLayoutFromSettings({
+            ...layoutSettings,
+            customWidth: netW,
+            customHeight: netH,
+            formatId: "custom",
+          });
+          let pageNetArtwork: string;
+          try {
+            pageNetArtwork = await normalizeNetArtworkForBleed(sourceUrl, bleedLayout, (m) =>
+              processing.stage(m),
+            );
+          } catch {
+            pageNetArtwork = sourceUrl;
+          }
+          const result = await aiGenerativeBleed(
+            sourceUrl,
+            netW,
+            netH,
+            "Custom",
+            bleedMm,
+            processing.getReporter(),
+            targetDpi,
+            safeMargin,
+          );
+          if (result.kind === "dual") {
+            const picked = result.gemini.imageUrl ?? result.openai.imageUrl;
+            if (!picked) return null;
+            return finalizeAiBleedUrl(picked, pageNetArtwork, layoutSettings);
+          }
+          if (!result.imageUrl) return null;
+          return finalizeAiBleedUrl(result.imageUrl, pageNetArtwork, layoutSettings);
+        });
+        syncPdfPageToCanvas(currentPage);
+        toast.success(`Bleed AI aplicat pe toate cele ${totalPages} pagini.`);
+      }
+
       return normalized;
     },
-    [processing, persistProcessedToHistory, settings],
+    [
+      finalizeAiBleedUrl,
+      settings,
+      currentPage,
+      file,
+      storePdfPageEdit,
+      syncPdfPageToCanvas,
+      persistProcessedToHistory,
+      isMultiPagePdf,
+      applyToAllPdfPages,
+      processing,
+      totalPages,
+    ],
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({ 
@@ -732,8 +1003,13 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
     noClick: !!file,
   });
 
-  const canvasHasEdits =
-    !!processedUrl && !!baseRasterRef.current && processedUrl !== baseRasterRef.current;
+  const canvasHasEdits = useMemo(() => {
+    void pdfEditsRevision;
+    if (file && isPdfFile(file)) {
+      return pdfHasAnyEdits(pdfPagesRef.current);
+    }
+    return !!processedUrl && !!baseRasterRef.current && processedUrl !== baseRasterRef.current;
+  }, [file, processedUrl, pdfEditsRevision]);
 
   const resolvePrintExportBuffer = useCallback(async (): Promise<ArrayBuffer> => {
     if (!originalBuffer || !file) throw new Error("No file loaded");
@@ -782,27 +1058,76 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       const currentFormat = PRINT_FORMATS.find(f => f.id === settings.formatId);
       const width = settings.formatId === 'custom' ? (settings.customWidth || 90) : currentFormat?.width || 90;
       const height = settings.formatId === 'custom' ? (settings.customHeight || 50) : currentFormat?.height || 50;
+      const layout = getPrintLayoutFromSettings(settings);
+      const bleed = settings.bleed || 0;
+      const dpi = resolveTargetDpi(settings.dpi);
 
-      // Use processedUrl (AI results) when the canvas was edited
       processing.stage("Pregătesc conținutul fișierului…");
-      const bufferToUse = await resolvePrintExportBuffer();
 
-      processing.stage("Generez PDF pentru tipar…");
-      const pdfBytes = await generatePrintPDF(
-        [bufferToUse],
-        width,
-        height,
-        settings.bleed || 0,
-        settings.safeMargin || 0,
-        resolveTargetDpi(settings.dpi),
-        false,
-        false,
-        settings.cutLineColor,
-        false,
-        isPdfFile(file) && !canvasHasEdits && settings.pdfPageRange === 'current'
-          ? currentPage - 1
-          : 'all'
-      );
+      let pdfBytes: Uint8Array;
+      if (isPdfFile(file) && pdfHasAnyEdits(pdfPagesRef.current)) {
+        const maps = pdfPagesRef.current;
+        const rasterPageBuffers = new Map<number, ArrayBuffer>();
+        const pageLayouts = new Map<number, { widthMm: number; heightMm: number }>();
+
+        for (const [pageNum, editUrl] of maps.edits) {
+          const meta = maps.meta.get(pageNum);
+          if (meta) {
+            pageLayouts.set(pageNum, { widthMm: meta.widthMm, heightMm: meta.heightMm });
+          }
+          const pageLayout = meta
+            ? getPrintLayoutFromSettings({
+                ...settings,
+                formatId: "custom",
+                customWidth: meta.widthMm,
+                customHeight: meta.heightMm,
+              })
+            : layout;
+          processing.stage(`Pregătesc pagina ${pageNum} pentru tipar…`);
+          const printReadyUrl = await upscaleDataUrlToPrintPixels(
+            editUrl,
+            pageLayout,
+            "total",
+            (m) => processing.stage(m),
+          );
+          const response = await fetch(printReadyUrl);
+          rasterPageBuffers.set(pageNum, await response.arrayBuffer());
+        }
+
+        processing.stage("Generez PDF pentru tipar…");
+        pdfBytes = await generatePrintPdfWithPageRasters(
+          originalBuffer,
+          rasterPageBuffers,
+          width,
+          height,
+          bleed,
+          settings.safeMargin || 0,
+          dpi,
+          false,
+          false,
+          settings.cutLineColor,
+          false,
+          pageLayouts,
+        );
+      } else {
+        const bufferToUse = await resolvePrintExportBuffer();
+        processing.stage("Generez PDF pentru tipar…");
+        pdfBytes = await generatePrintPDF(
+          [bufferToUse],
+          width,
+          height,
+          bleed,
+          settings.safeMargin || 0,
+          dpi,
+          false,
+          false,
+          settings.cutLineColor,
+          false,
+          isPdfFile(file) && !canvasHasEdits && settings.pdfPageRange === 'current'
+            ? currentPage - 1
+            : 'all',
+        );
+      }
 
       const blob = new Blob([pdfBytes], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
@@ -1105,6 +1430,9 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         setTracedSvg(null);
         setIsUpscaleNeeded(false);
         setCurrentPage(1);
+        clearPdfPageMaps(pdfPagesRef.current);
+        bumpPdfEdits();
+        pdfBatchUpscaleRef.current = null;
 
         const buffer = await blob.arrayBuffer();
         const historyFile = new File([blob], fileName, {
@@ -1380,8 +1708,8 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
       toast.error("Setează bleed (mm) înainte de a genera marginile.");
       return;
     }
-    processing.begin("Adaug bleed rapid…");
-    const toastId = toast.loading(`Bleed rapid (${bleedMm} mm pe latură)…`);
+    processing.begin("Adaug bleed…");
+    const toastId = toast.loading(`Bleed (${bleedMm} mm pe latură)…`);
     try {
       const layoutSettings: ProcessingSettings = {
         ...settings,
@@ -1392,18 +1720,39 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
         safeMargin: settings.safeMargin ?? 3,
       };
       setSettings(layoutSettings);
-      const finalized = await applyAlgorithmicBleed(source, {
-        layoutSettings,
-      });
-      if (!finalized) throw new Error("EMPTY_RESPONSE");
-      setProcessedUrl(finalized);
-      setPreviewUrl(finalized);
-      setCanvasRevision((n) => n + 1);
-      toast.dismiss(toastId);
-      processing.stage("Bleed rapid adăugat (extrapolare din marginea imaginii).");
-      void persistProcessedToHistory(finalized, "generative_fill", "bleed_algorithmic", {
-        postProcess: "algorithmic_bleed",
-      });
+
+      const bleedPage = async (src: string, pageNum: number) => {
+        const pageMeta = pdfPagesRef.current.meta.get(pageNum);
+        const pageLayout = pageMeta
+          ? { ...layoutSettings, formatId: "custom" as const, customWidth: pageMeta.widthMm, customHeight: pageMeta.heightMm }
+          : layoutSettings;
+        return applyAlgorithmicBleed(src, { layoutSettings: pageLayout });
+      };
+
+      if (isMultiPagePdf()) {
+        await applyToAllPdfPages("Bleed", async (src, pageNum) => {
+          const finalized = await bleedPage(src, pageNum);
+          return finalized ?? null;
+        });
+        toast.dismiss(toastId);
+        toast.success(`Bleed aplicat pe toate cele ${totalPages} pagini.`);
+      } else {
+        const finalized = await bleedPage(source, currentPage);
+        if (!finalized) throw new Error("EMPTY_RESPONSE");
+        if (file && isPdfFile(file)) {
+          storePdfPageEdit(currentPage, finalized);
+          syncPdfPageToCanvas(currentPage);
+        } else {
+          setProcessedUrl(finalized);
+          setPreviewUrl(finalized);
+          setCanvasRevision((n) => n + 1);
+        }
+        toast.dismiss(toastId);
+        processing.stage("Bleed adăugat (extrapolare din marginea imaginii).");
+        void persistProcessedToHistory(finalized, "generative_fill", "bleed_algorithmic", {
+          postProcess: "algorithmic_bleed",
+        });
+      }
     } catch (err) {
       toast.dismiss(toastId);
       aiError("handleAlgorithmicBleed", err);
@@ -1825,48 +2174,17 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
           </section>
 
           <section className="sidebar-section space-y-2">
-            <p className="sidebar-kicker">AI</p>
-                <button
-                  type="button"
-                  onClick={() => void handleUpscale("extend")}
-                  disabled={isProcessing || !canvasDisplayUrl}
-                  className="sidebar-action"
-                  data-active={(settings.upscaleMode ?? "extend") === "extend" ? "true" : "false"}
-                >
-                  <ArrowUpCircle className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  AI Extend
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleUpscale("recompose")}
-                  disabled={isProcessing || !canvasDisplayUrl}
-                  className="sidebar-action"
-                  data-active={settings.upscaleMode === "recompose" ? "true" : "false"}
-                >
-                  <Layers className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  AI Recompose
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleAiGenerativeBleed()}
-                  disabled={isProcessing || !canvasDisplayUrl}
-                  className="sidebar-action"
-                  data-active={settings.generativeBleed ? "true" : "false"}
-                  title="AI extinde arta net cu bleed generativ (fără canvas alb pre-completat)"
-                >
-                  <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  Bleed AI
-                </button>
+            <p className="sidebar-kicker">Procesare</p>
                 <button
                   type="button"
                   onClick={() => void handleAlgorithmicBleed()}
                   disabled={isProcessing || !canvasDisplayUrl}
                   className="sidebar-action"
                   data-active="false"
-                  title="Extrapolare rapidă: ultimul pixel de pe margini (fără API)"
+                  title="Extrapolare din marginea imaginii (fără API)"
                 >
                   <Zap className="h-3.5 w-3.5 shrink-0 opacity-70" />
-                  Bleed rapid
+                  Bleed
                 </button>
           </section>
 
@@ -2419,8 +2737,16 @@ export function PrintWorkspace({ user, history, groupedHistory, onHistoryRefresh
                               >
                                 <ChevronLeft className="h-4 w-4" />
                               </button>
-                              <span className="min-w-[3rem] text-center text-[10px] font-bold text-[var(--text-muted)]">
-                                Page {currentPage} / {totalPages}
+                              <span
+                                key={pdfEditsRevision}
+                                className="min-w-[3rem] text-center text-[10px] font-bold text-[var(--text-muted)]"
+                              >
+                                Pag. {currentPage} / {totalPages}
+                                {pdfPagesRef.current.edits.has(currentPage) && (
+                                  <span className="mt-0.5 block text-[8px] font-semibold uppercase text-emerald-400">
+                                    editată
+                                  </span>
+                                )}
                               </span>
                               <button
                                 onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}

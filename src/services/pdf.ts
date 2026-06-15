@@ -338,3 +338,229 @@ export async function generatePrintPDF(
   const pdfBytes = await pdfDoc.save();
   return pdfBytes;
 }
+
+type RasterPrintPageOptions = {
+  widthMm: number;
+  heightMm: number;
+  bleedMm: number;
+  addCutLine: boolean;
+  showCropMarks: boolean;
+};
+
+async function embedRasterOnPrintPage(
+  pdfDoc: PDFDocument,
+  font: Awaited<ReturnType<typeof PDFDocument.prototype.embedFont>>,
+  uint8Array: Uint8Array,
+  opts: RasterPrintPageOptions,
+): Promise<void> {
+  const mmToPoints = (mm: number) => (mm / 25.4) * 72;
+  const { widthMm, heightMm, bleedMm, addCutLine, showCropMarks } = opts;
+  const pageWidth = mmToPoints(widthMm + 2 * bleedMm);
+  const pageHeight = mmToPoints(heightMm + 2 * bleedMm);
+
+  let image;
+  const isPng =
+    uint8Array[0] === 0x89 &&
+    uint8Array[1] === 0x50 &&
+    uint8Array[2] === 0x4e &&
+    uint8Array[3] === 0x47;
+  const isJpg = uint8Array[0] === 0xff && uint8Array[1] === 0xd8;
+  if (isPng) {
+    image = await pdfDoc.embedPng(uint8Array);
+  } else if (isJpg) {
+    image = await pdfDoc.embedJpg(uint8Array);
+  } else {
+    try {
+      image = await pdfDoc.embedPng(uint8Array);
+    } catch {
+      image = await pdfDoc.embedJpg(uint8Array);
+    }
+  }
+
+  const page = pdfDoc.addPage([pageWidth, pageHeight]);
+  page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, color: rgb(1, 1, 1) });
+
+  const imgDims = image.scale(1);
+  const imgRatio = imgDims.width / imgDims.height;
+  const targetW = mmToPoints(widthMm + 2 * bleedMm);
+  const targetH = mmToPoints(heightMm + 2 * bleedMm);
+  const targetRatio = targetW / targetH;
+
+  let drawW = targetW;
+  let drawH = targetH;
+  let offX = 0;
+  let offY = 0;
+
+  if (imgRatio > targetRatio) {
+    drawW = targetH * imgRatio;
+    offX = -(drawW - targetW) / 2;
+  } else {
+    drawH = targetW / imgRatio;
+    offY = -(drawH - targetH) / 2;
+  }
+
+  page.drawImage(image, { x: offX, y: offY, width: drawW, height: drawH });
+
+  if (showCropMarks) {
+    const markLength = mmToPoints(5);
+    const markOffset = mmToPoints(2);
+    const color = rgb(0, 0, 0);
+    const thickness = 0.5;
+    const bleedPts = mmToPoints(bleedMm);
+    const widthPts = mmToPoints(widthMm);
+    const heightPts = mmToPoints(heightMm);
+
+    page.drawLine({
+      start: { x: bleedPts, y: pageHeight - markOffset },
+      end: { x: bleedPts, y: pageHeight - markOffset - markLength },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: markOffset, y: pageHeight - bleedPts },
+      end: { x: markOffset + markLength, y: pageHeight - bleedPts },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: pageWidth - bleedPts, y: pageHeight - markOffset },
+      end: { x: pageWidth - bleedPts, y: pageHeight - markOffset - markLength },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: pageWidth - markOffset, y: pageHeight - bleedPts },
+      end: { x: pageWidth - markOffset - markLength, y: pageHeight - bleedPts },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: bleedPts, y: markOffset },
+      end: { x: bleedPts, y: markOffset + markLength },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: markOffset, y: bleedPts },
+      end: { x: markOffset + markLength, y: bleedPts },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: pageWidth - bleedPts, y: markOffset },
+      end: { x: pageWidth - bleedPts, y: markOffset + markLength },
+      color,
+      thickness,
+    });
+    page.drawLine({
+      start: { x: pageWidth - markOffset, y: bleedPts },
+      end: { x: pageWidth - markOffset - markLength, y: bleedPts },
+      color,
+      thickness,
+    });
+  }
+
+  if (addCutLine) {
+    const color = cmyk(0, 1, 0, 0);
+    page.drawRectangle({
+      x: mmToPoints(bleedMm),
+      y: mmToPoints(bleedMm),
+      width: mmToPoints(widthMm),
+      height: mmToPoints(heightMm),
+      borderColor: color,
+      borderWidth: 0.5,
+      color: undefined,
+    });
+  }
+}
+
+/** Export PDF cu pagini vectoriale nemodificate + pagini raster din editări AI. */
+export async function generatePrintPdfWithPageRasters(
+  originalPdfBuffer: ArrayBuffer,
+  rasterPageBuffers: Map<number, ArrayBuffer>,
+  widthMm: number,
+  heightMm: number,
+  bleedMm: number,
+  safeMarginMm: number,
+  dpi: number,
+  addCutLine: boolean,
+  addSafeZone: boolean,
+  cutLineColor: string,
+  showCropMarks: boolean = false,
+  pageLayouts?: Map<number, { widthMm: number; heightMm: number }>,
+): Promise<Uint8Array> {
+  void safeMarginMm;
+  void dpi;
+  void cutLineColor;
+  void addSafeZone;
+
+  const pdfDoc = await PDFDocument.create();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const mmToPoints = (mm: number) => (mm / 25.4) * 72;
+  const externalPdf = await PDFDocument.load(originalPdfBuffer);
+  const pageCount = externalPdf.getPageCount();
+
+  for (let i = 0; i < pageCount; i++) {
+    const pageNum = i + 1;
+    const pageLayout = pageLayouts?.get(pageNum);
+    const pageWidthMm = pageLayout?.widthMm ?? widthMm;
+    const pageHeightMm = pageLayout?.heightMm ?? heightMm;
+    const raster = rasterPageBuffers.get(pageNum);
+
+    if (raster) {
+      await embedRasterOnPrintPage(pdfDoc, font, new Uint8Array(raster), {
+        widthMm: pageWidthMm,
+        heightMm: pageHeightMm,
+        bleedMm,
+        addCutLine,
+        showCropMarks,
+      });
+      continue;
+    }
+
+    const pageWidth = mmToPoints(pageWidthMm + 2 * bleedMm);
+    const pageHeight = mmToPoints(pageHeightMm + 2 * bleedMm);
+    const page = pdfDoc.addPage([pageWidth, pageHeight]);
+    const embeddedPage = await pdfDoc.embedPage(externalPdf.getPage(i));
+    const pageDims = embeddedPage.scale(1);
+    const pageRatio = pageDims.width / pageDims.height;
+    const targetW = mmToPoints(pageWidthMm);
+    const targetH = mmToPoints(pageHeightMm);
+    const targetRatio = targetW / targetH;
+
+    let drawW = targetW;
+    let drawH = targetH;
+    let offX = 0;
+    let offY = 0;
+
+    if (pageRatio > targetRatio) {
+      drawW = targetH * pageRatio;
+      offX = -(drawW - targetW) / 2;
+    } else {
+      drawH = targetW / pageRatio;
+      offY = -(drawH - targetH) / 2;
+    }
+
+    page.drawPage(embeddedPage, {
+      x: mmToPoints(bleedMm) + offX,
+      y: mmToPoints(bleedMm) + offY,
+      width: drawW,
+      height: drawH,
+    });
+
+    if (addCutLine) {
+      const color = cmyk(0, 1, 0, 0);
+      page.drawRectangle({
+        x: mmToPoints(bleedMm),
+        y: mmToPoints(bleedMm),
+        width: mmToPoints(pageWidthMm),
+        height: mmToPoints(pageHeightMm),
+        borderColor: color,
+        borderWidth: 0.5,
+        color: undefined,
+      });
+    }
+  }
+
+  return pdfDoc.save();
+}
